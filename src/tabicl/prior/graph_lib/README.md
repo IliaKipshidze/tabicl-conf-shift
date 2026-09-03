@@ -126,6 +126,18 @@ the source shift:
 - Graph-U identity control: enabled with location `0` and scale `1`;
 - Graph-U shift: enabled with a nonzero location and/or nonunit scale.
 
+Run the generation-only diagnostic (no model training) with:
+
+```bash
+python scripts/smoke_graph_u.py --datasets 20
+```
+
+The diagnostic defaults to a visible shift (location `2`, scale `1.5`). Add
+`--query-location 0 --query-scale 1` for the identity control. It reports
+rejected graph proposals and temporarily captures the selected hidden root in
+memory to verify the source transformation. These latent values are not added
+to the generated dataset or saved by the normal prior API.
+
 `ensure_iid=True` is intentionally rejected with Graph-U in this version,
 because TabICL's extra evaluation pass currently resamples root-level
 mechanisms. Also note that some original TabICL transformations are fitted on
