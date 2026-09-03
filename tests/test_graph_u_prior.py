@@ -241,8 +241,12 @@ def test_graph_u_cli_config_round_trip():
     assert config.graph_u_enabled is True
     assert config.graph_u_query_location == -1.25
     assert config.graph_u_query_scale == 2.5
-    assert config.graph_u_force_gaussian is True
+    assert config.graph_u_force_gaussian is False
     assert config.graph_u_max_attempts == 17
+
+
+def test_graph_u_does_not_force_gaussian_by_default():
+    assert PriorConfig().graph_u_force_gaussian is False
 
 
 def test_graph_u_requires_graph_scm_prior_type():

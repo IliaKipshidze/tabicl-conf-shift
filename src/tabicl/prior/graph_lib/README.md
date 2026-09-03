@@ -83,18 +83,20 @@ distinct target node. Only this selected root receives an environment-specific
 source distribution; its effects then propagate through the ordinary graph
 evaluation.
 
-The initial implementation uses a Gaussian base source by default. It samples
-the support and query parts together, applies
+By default, the selected confounder retains the graph prior's usual randomly
+selected base-source family. The implementation samples the support and query
+parts together, applies
 
 ```text
 Z_query = graph_u_query_scale * Z_query + graph_u_query_location
 ```
 
 only to the query slice, and then applies one shared random root function to
-the combined tensor. Thus the configured Gaussian parameters describe the
-exogenous source feeding the hidden node. The final hidden node can have a
-non-Gaussian distribution after TabICL's random root function and node
-transformations.
+the combined tensor. This affine transformation shifts the exogenous source
+feeding the hidden node for any source family. Set
+`graph_u_force_gaussian=True` for a Gaussian-only controlled ablation. The
+final hidden node can still have a non-Gaussian distribution after TabICL's
+random root function and node transformations.
 
 ```python
 from tabicl.prior import PriorDataset
