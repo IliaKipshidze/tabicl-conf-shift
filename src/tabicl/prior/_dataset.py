@@ -355,7 +355,14 @@ class Prior:
         return X_new, d_new
 
     @staticmethod
-    def cls_sanity_check(X: Tensor, y: Tensor, train_size: int, n_attempts: int = 10, min_classes: int = 2) -> bool:
+    def cls_sanity_check(
+            X: Tensor,
+            y: Tensor,
+            train_size: int,
+            n_attempts: int = 10,
+            min_classes: int = 2,
+            allow_cross_split_permutation: bool = True,
+    ) -> bool:
         """
         Verifies that both train and test sets contain all classes for classification datasets.
 
@@ -380,6 +387,12 @@ class Prior:
         min_classes : int, default=2
             Minimum number of classes required in both train and test sets
 
+        allow_cross_split_permutation : bool, default=True
+            Whether invalid splits may be repaired by permuting rows across the
+            train/test boundary. This must be disabled when the two portions are
+            sampled from different environments, because such a permutation
+            would mix the environments.
+
         Returns
         -------
         bool
@@ -402,6 +415,9 @@ class Prior:
         for i, (xi, yi) in enumerate(zip(X, y)):
             if is_valid_split(yi):
                 continue
+
+            if not allow_cross_split_permutation:
+                return False
 
             # If the dataset has an invalid split, try to fix it with random permutations
             succeeded = False
@@ -957,7 +973,20 @@ class GraphPrior(Prior):
             - d: Number of active features after filtering (scalar Tensor)
         """
 
+        max_attempts = self.config.graph_u_max_attempts if self.config.graph_u_enabled else None
+        attempt = 0
+        rejection_counts = {
+            "no_active_features": 0,
+            "invalid_class_split": 0,
+            "dataset_filter": 0,
+        }
         while True:
+            if max_attempts is not None and attempt >= max_attempts:
+                raise RuntimeError(
+                    f"Unable to generate a valid Graph-U dataset after {max_attempts} attempts; "
+                    f"rejections={rejection_counts}"
+                )
+            attempt += 1
             X, y = GraphSCM(**params)()
 
             # Add batch dim for single dataset to be compatible with delete_unique_features and sanity_check
@@ -967,12 +996,23 @@ class GraphPrior(Prior):
             # Only keep valid datasets with sufficient features and balanced classes
             X, d = self.delete_unique_features(X, d)
             if not (d > 0).all():
+                rejection_counts["no_active_features"] += 1
                 continue
 
-            if not (self.regression or self.cls_sanity_check(X, y, params["train_size"])):
+            if not (
+                    self.regression
+                    or self.cls_sanity_check(
+                        X,
+                        y,
+                        params["train_size"],
+                        allow_cross_split_permutation=not self.config.graph_u_enabled,
+                    )
+            ):
+                rejection_counts["invalid_class_split"] += 1
                 continue
 
             if should_filter(X[0], y[0], self.config, is_classif=not self.regression):
+                rejection_counts["dataset_filter"] += 1
                 continue
 
             return X.squeeze(0), y.squeeze(0), d.squeeze(0)
@@ -1359,6 +1399,12 @@ class PriorDataset(IterableDataset):
             device: str = "cpu",
     ):
         super().__init__()
+        if (
+                config is not None
+                and getattr(config, "graph_u_enabled", False)
+                and prior_type != "graph_scm"
+        ):
+            raise ValueError("Graph-U requires prior_type='graph_scm'")
         if prior_type == "dummy":
             self.prior = DummyPrior(
                 regression=regression,

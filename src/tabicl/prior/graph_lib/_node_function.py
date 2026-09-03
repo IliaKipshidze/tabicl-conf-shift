@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 
 from tabicl.prior.graph_lib._base import RandomTransformer, Context, FeatureSpec
@@ -13,9 +13,16 @@ class RandomNodeFunction(RandomTransformer):
     """
     Computes the node matrix from the parents' matrices, and optionally extracts columns for the dataset.
     """
-    def __init__(self, context: Context, feature_specs: Dict[str, FeatureSpec]):
+    def __init__(
+        self,
+        context: Context,
+        feature_specs: Dict[str, FeatureSpec],
+        *,
+        graph_u_n_train: Optional[int] = None,
+    ):
         super().__init__(context)
         self.feature_specs = feature_specs
+        self.graph_u_n_train = graph_u_n_train
 
     def _fit(self, x: List[torch.Tensor], n_samples: int):
         self.converters_ = dict()
@@ -41,8 +48,17 @@ class RandomNodeFunction(RandomTransformer):
 
     def _transform(self, x: List[torch.Tensor], n_samples: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if len(x) == 0:
-            x = self.random_points_.sample(n_samples, self.n_features_)
+            if self.graph_u_n_train is None:
+                x = self.random_points_.sample(n_samples, self.n_features_)
+            else:
+                x = self.random_points_.sample(
+                    n_samples,
+                    self.n_features_,
+                    graph_u_n_train=self.graph_u_n_train,
+                )
         else:
+            if self.graph_u_n_train is not None:
+                raise ValueError("A Graph-U source intervention can only be applied to a root node")
             x = self.random_func_(x)
 
         if self.config.use_node_feature_importance:

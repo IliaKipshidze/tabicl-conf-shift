@@ -1,4 +1,5 @@
 from __future__ import annotations
+from numbers import Integral
 from typing import Optional
 
 import torch
@@ -22,6 +23,10 @@ class GraphSCM:
 
     seq_len : int, default=1024
         The number of samples (rows) to generate for the dataset.
+
+    train_size : int | None, default=None
+        Number of support rows. The remaining ``seq_len - train_size`` rows are
+        query rows. If omitted, all rows are support rows as in the original prior.
 
     num_features : int, default=100
         The number of features.
@@ -88,6 +93,7 @@ class GraphSCM:
         permute_labels: bool = True,
         config: Optional[PriorConfig] = None,
         device: str = "cpu",
+        train_size: Optional[int] = None,
         **kwargs,
     ):
         super(GraphSCM, self).__init__()
@@ -100,20 +106,31 @@ class GraphSCM:
         self.permute_labels = permute_labels
         self.config = config
         self.device = device
+        if train_size is not None:
+            if not isinstance(train_size, Integral) or isinstance(train_size, bool):
+                raise TypeError(f"train_size must be an integer or None, got {train_size!r}")
+            if not 0 <= train_size <= seq_len:
+                raise ValueError(
+                    f"train_size must be between 0 and seq_len={seq_len}, got {train_size}"
+                )
+            train_size = int(train_size)
+        self.train_size = train_size
 
     def __call__(self) -> None:
         """Generate a dataset and return features and target."""
 
         context = Context(config=self.config, device=self.device)
+        n_train = self.seq_len if self.train_size is None else self.train_size
         properties = DatasetProperties(
-            n_train=self.seq_len,
-            n_test=0,
+            n_train=n_train,
+            n_test=self.seq_len - n_train,
             cat_sizes={
                 "x": sample_categorical_sizes(self.num_features, context, max_cat_size=200),
                 "y": [0 if self.regression else self.num_classes],
             },
         )
         ds = RandomDataset(context).sample(properties)
+        self.metadata_ = dict(ds.kwargs)
         data = ds.get_concat_tensors()
 
         X_cat = data.get("x_cat", None)

@@ -1,3 +1,6 @@
+from numbers import Integral
+from typing import Optional
+
 import torch
 
 from tabicl.prior.graph_lib._base import PriorComponent
@@ -5,9 +8,40 @@ from tabicl.prior.graph_lib._weights import RandomWeights
 
 
 class RandomPoints(PriorComponent):
-    def sample(self, n_batch: int, n: int) -> torch.Tensor:
+    def sample(self, n_batch: int, n: int, *, graph_u_n_train: Optional[int] = None) -> torch.Tensor:
         # local import to avoid circular imports
         from tabicl.prior.graph_lib._function import RandomFunction
+
+        if graph_u_n_train is not None:
+            if not self.config.graph_u_enabled:
+                raise ValueError("A Graph-U boundary was supplied while graph_u_enabled=False")
+            if not isinstance(graph_u_n_train, Integral) or isinstance(graph_u_n_train, bool):
+                raise TypeError("graph_u_n_train must be an integer")
+            graph_u_n_train = int(graph_u_n_train)
+            if not 0 < graph_u_n_train < n_batch:
+                raise ValueError(
+                    "Graph-U requires 0 < graph_u_n_train < n_batch; "
+                    f"got graph_u_n_train={graph_u_n_train}, n_batch={n_batch}"
+                )
+            if self.config.graph_u_query_scale <= 0:
+                raise ValueError("graph_u_query_scale must be positive")
+
+            if self.config.graph_u_force_gaussian:
+                base_points = RandomGaussianPoints
+            else:
+                base_points = self.sampler.choice(
+                    "random_base_points",
+                    [RandomUniformPoints, RandomCirclePoints, RandomGaussianPoints, RandomCovariancePoints],
+                )
+
+            points = base_points(self.context).sample(n_batch, n)
+            points[graph_u_n_train:] = (
+                self.config.graph_u_query_scale * points[graph_u_n_train:]
+                + self.config.graph_u_query_location
+            )
+
+            # Fit and apply exactly one root function to the combined support-query tensor.
+            return RandomFunction(self.context, n, n)(points)
 
         base_points = self.sampler.choice(
             "random_base_points",

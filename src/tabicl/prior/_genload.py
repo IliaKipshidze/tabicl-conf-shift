@@ -536,6 +536,11 @@ class SavePriorDataset:
             "max_train_size": self.args.max_train_size,
             "replay_small": self.args.replay_small,
             "graph_noise": self.args.graph_noise,
+            "graph_u_enabled": getattr(self.args, "graph_u_enabled", False),
+            "graph_u_query_location": getattr(self.args, "graph_u_query_location", 0.0),
+            "graph_u_query_scale": getattr(self.args, "graph_u_query_scale", 1.0),
+            "graph_u_force_gaussian": getattr(self.args, "graph_u_force_gaussian", True),
+            "graph_u_max_attempts": getattr(self.args, "graph_u_max_attempts", 1000),
         }
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
