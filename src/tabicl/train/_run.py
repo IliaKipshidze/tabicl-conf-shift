@@ -27,6 +27,12 @@ from tabicl._model.attention import HAS_FLASH_ATTN3, set_flash_attn3_enabled
 from tabicl.prior._dataset import PriorDataset
 from tabicl.prior._genload import LoadPriorDataset, seed_worker
 from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.train._checkpoint import (
+    build_run_config,
+    checkpoint_training_metadata,
+    normalize_config,
+    save_run_config,
+)
 from tabicl.train._optim import get_scheduler
 from tabicl.train._muon import Muon
 from tabicl.train._train_config import build_parser
@@ -85,6 +91,10 @@ class Trainer:
 
     def __init__(self, config):
         self.config = config
+        requested_config = normalize_config(vars(config))
+        assert isinstance(requested_config, dict)
+        self.training_config = requested_config
+        self.prior_config = None
         self.configure_ddp()
         self.configure_wandb()
         self.build_model()
@@ -93,6 +103,7 @@ class Trainer:
         self.configure_amp()
         self.load_checkpoint()
         self.seed()
+        self.persist_run_config()
 
     def configure_ddp(self):
         """Set up distributed training and system configuration.
@@ -277,6 +288,11 @@ class Trainer:
 
         if self.config.prior_dir is None:
             # Generate prior data on the fly
+            prior_config = PriorConfig.from_args(self.config)
+            normalized_prior_config = normalize_config(prior_config)
+            assert isinstance(normalized_prior_config, dict)
+            normalized_prior_config["prior_type"] = self.config.prior_type
+            self.prior_config = normalized_prior_config
             dataset = PriorDataset(
                 regression=self.regression,
                 batch_size=self.config.batch_size,
@@ -293,7 +309,7 @@ class Trainer:
                 max_train_size=self.config.max_train_size,
                 replay_small=self.config.replay_small,
                 prior_type=self.config.prior_type,
-                config=PriorConfig.from_args(self.config),  # graph_scm prior options
+                config=prior_config,  # graph_scm prior options
                 device=self.config.prior_device,
                 n_jobs=1,  # Set to 1 to avoid nested parallelism; the DataLoader parallelizes across batches
             )
@@ -308,6 +324,10 @@ class Trainer:
                 delete_after_load=self.config.delete_after_load,
                 device=self.config.prior_device,
             )
+            if isinstance(dataset.metadata, dict):
+                normalized_prior_config = normalize_config(dataset.metadata)
+                assert isinstance(normalized_prior_config, dict)
+                self.prior_config = normalized_prior_config
 
         if self.master_process:
             print(dataset)
@@ -479,13 +499,35 @@ class Trainer:
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(self.config.checkpoint_dir, name)
         checkpoint = {
+            # Keep this model-only: the sklearn inference wrappers pass it to TabICL(**config).
             "config": self.model_config,
             "state_dict": self.raw_model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
             "curr_step": self.curr_step,
+            **checkpoint_training_metadata(
+                self.training_config,
+                self.prior_config,
+            ),
         }
         torch.save(checkpoint, checkpoint_path)
+
+    def persist_run_config(self):
+        """Save a human-readable copy of the requested experiment settings."""
+
+        if not self.master_process or self.config.checkpoint_dir is None:
+            return
+        payload = build_run_config(
+            model_config=self.model_config,
+            training_config=self.training_config,
+            prior_config=self.prior_config,
+        )
+        path = save_run_config(
+            self.config.checkpoint_dir,
+            payload,
+            current_step=self.curr_step,
+        )
+        print(f"Saved run configuration to {path}")
 
     def manage_checkpoint(self):
         """Manage temporary checkpoints by deleting the oldest when limit is exceeded."""

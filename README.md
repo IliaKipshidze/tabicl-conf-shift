@@ -327,6 +327,14 @@ Training supports classification (cross-entropy) and quantile regression (pinbal
 `--regression_method quantile`), and both the **AdamW** (default) and **Muon** (`--muon True`)
 optimizers. See `python -m tabicl.train --help` for the full set of options.
 
+Each new pre-training run writes a human-readable `run_config.json` in its checkpoint directory.
+Every checkpoint also retains separate `training_config` and effective `prior_config` mappings;
+the existing `config` field remains reserved for model architecture compatibility. In particular,
+Graph-U checkpoints record the exact location, scale, and source-family setting needed to define a
+matched synthetic evaluation. A later evaluator can retrieve these settings with
+`tabicl.train._checkpoint.load_matched_graph_u_config`. Legacy upstream checkpoints do not contain
+this provenance, so their evaluation shift must be supplied explicitly.
+
 A note on the v2 training: the paper reports using cautious weight decay, which is
 available via `--use_cautious_wd`, but the released checkpoints were trained with it left `False`
 (it was not wired into Muon during the reference runs), so the v2 scripts keep it `False` to
