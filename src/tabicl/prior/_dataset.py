@@ -894,6 +894,11 @@ class GraphPrior(Prior):
 
     device : str, default="cpu"
         Computation device ('cpu' or 'cuda')
+
+    generation_max_attempts : int | None, default=None
+        Optional outer retry bound for callers such as offline evaluation.
+        When omitted, ordinary generation retains its original unbounded behavior;
+        Graph-U generation uses ``config.graph_u_max_attempts``.
     """
 
     def __init__(
@@ -917,6 +922,7 @@ class GraphPrior(Prior):
             n_jobs: int = -1,
             num_threads_per_generate: int = 1,
             device: str = "cpu",
+            generation_max_attempts: Optional[int] = None,
     ):
         super().__init__(
             regression=regression,
@@ -940,6 +946,15 @@ class GraphPrior(Prior):
         self.n_jobs = n_jobs
         self.num_threads_per_generate = num_threads_per_generate
         self.device = device
+        if generation_max_attempts is not None and (
+            not isinstance(generation_max_attempts, int)
+            or isinstance(generation_max_attempts, bool)
+            or generation_max_attempts <= 0
+        ):
+            raise ValueError(
+                "generation_max_attempts must be a positive integer or None"
+            )
+        self.generation_max_attempts = generation_max_attempts
 
     @torch.no_grad()
     def generate_dataset(self, params: Dict[str, Any]) -> Tuple[Tensor, Tensor, Tensor]:
@@ -973,7 +988,9 @@ class GraphPrior(Prior):
             - d: Number of active features after filtering (scalar Tensor)
         """
 
-        max_attempts = self.config.graph_u_max_attempts if self.config.graph_u_enabled else None
+        max_attempts = self.generation_max_attempts
+        if max_attempts is None and self.config.graph_u_enabled:
+            max_attempts = self.config.graph_u_max_attempts
         attempt = 0
         rejection_counts = {
             "no_active_features": 0,
@@ -982,8 +999,9 @@ class GraphPrior(Prior):
         }
         while True:
             if max_attempts is not None and attempt >= max_attempts:
+                dataset_kind = "Graph-U " if self.config.graph_u_enabled else ""
                 raise RuntimeError(
-                    f"Unable to generate a valid Graph-U dataset after {max_attempts} attempts; "
+                    f"Unable to generate a valid {dataset_kind}dataset after {max_attempts} attempts; "
                     f"rejections={rejection_counts}"
                 )
             attempt += 1

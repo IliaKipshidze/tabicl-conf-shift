@@ -391,6 +391,56 @@ def test_graph_prior_bounds_outer_retries_and_preserves_environment_boundary(
     assert allow_permutation == [False, False]
 
 
+def test_evaluator_can_bound_ordinary_graph_prior_retries(monkeypatch):
+    class AlwaysInvalidGraphSCM:
+        calls = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self):
+            self.__class__.calls += 1
+            X = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+            y = torch.tensor([0, 0, 1, 1])
+            return X, y
+
+    config = PriorConfig(graph_u_enabled=False)
+    prior = GraphPrior(
+        config=config,
+        n_jobs=1,
+        generation_max_attempts=2,
+    )
+    allow_permutation: list[bool] = []
+
+    def reject_split(
+        _X, _y, _train_size, *, allow_cross_split_permutation=True, **_kwargs
+    ):
+        allow_permutation.append(allow_cross_split_permutation)
+        return False
+
+    monkeypatch.setattr(prior_dataset_module, "GraphSCM", AlwaysInvalidGraphSCM)
+    monkeypatch.setattr(prior, "cls_sanity_check", reject_split)
+    params = {
+        "regression": False,
+        "seq_len": 4,
+        "train_size": 2,
+        "num_features": 2,
+        "max_features": 2,
+        "num_classes": 2,
+        "device": "cpu",
+        "config": config,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="Unable to generate a valid dataset after 2 attempts",
+    ):
+        prior.generate_dataset(params)
+
+    assert AlwaysInvalidGraphSCM.calls == 2
+    assert allow_permutation == [True, True]
+
+
 def test_random_dataset_bounds_graph_u_dag_rejection(monkeypatch):
     class NeverConfoundedDAG:
         calls = 0

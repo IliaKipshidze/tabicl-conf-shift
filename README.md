@@ -335,6 +335,55 @@ matched synthetic evaluation. A later evaluator can retrieve these settings with
 `tabicl.train._checkpoint.load_matched_graph_u_config`. Legacy upstream checkpoints do not contain
 this provenance, so their evaluation shift must be supplied explicitly.
 
+### Prior-native Graph-U evaluation
+
+Evaluate one or more checkpoints directly on synthetic tasks generated on the fly:
+
+```bash
+python -m tabicl.evaluation \
+  checkpoints/baseline.ckpt checkpoints/graph_u.ckpt \
+  --reference-checkpoint checkpoints/graph_u.ckpt \
+  --condition ordinary \
+  --condition identity \
+  --condition matched \
+  --condition stronger:4:2 \
+  --datasets 100 \
+  --support-size 128 \
+  --query-size 128 \
+  --features 10 \
+  --classes 2 \
+  --output results/graph_u.json
+```
+
+`ordinary` disables Graph-U conditioning, `identity` requires a hidden confounder but applies no
+support-query shift, and `matched` reads the shift used for training from the reference checkpoint.
+A custom condition has the form `NAME:QUERY_LOCATION:QUERY_SCALE[:FORCE_GAUSSIAN]`. The reference
+checkpoint supplies one common base prior for every model, so a baseline and Graph-U checkpoint are
+compared on exactly the same generated tasks within each condition.
+
+The evaluator does not save generated `X` or `y` tensors. Each task is regenerated from an isolated,
+deterministic seed and discarded after scoring; the JSON manifest retains its seed, tensor hash,
+configuration, and metrics. During inference the model receives all support/query feature rows and
+only the support labels. Query labels are kept outside the model and used afterward for scoring.
+Classification reports accuracy, log loss, and Brier score; regression reports RMSE, MAE, median
+MAE, R-squared, predictive pinball loss, its finite-grid CRPS approximation, and the raw training
+pinball objective. The command writes comprehensive JSON plus summary and per-task CSV files
+(unless `--no-csv` is specified). It refuses to replace an existing result unless `--overwrite`
+is passed. Results include checkpoint SHA-256 hashes, runtime/code provenance, prior reconstruction
+details, per-metric counts, standard errors, and normal-approximation 95% confidence intervals.
+
+Classification and regression use different TabICL output heads and training objectives. Train and
+evaluate them as separate checkpoints and commands; the evaluator detects the checkpoint type and
+rejects a mixed list.
+
+> **Known pairing limitation:** the current `graph_scm` generator fits some mechanisms/converters
+> and final scaling using the combined support and query rows. Consequently, changing only query
+> `U` can also change the returned support `X` and sometimes support `y`, even with the same seed.
+> For classification, shift-dependent validation may also reject that SCM and accept a different
+> one. Checkpoints still receive byte-identical tasks within each condition (verified by stored
+> hashes), but comparisons between conditions are distribution-level comparisons, not strict
+> fixed-support, same-SCM counterfactual pairs.
+
 A note on the v2 training: the paper reports using cautious weight decay, which is
 available via `--use_cautious_wd`, but the released checkpoints were trained with it left `False`
 (it was not wired into Muon during the reference runs), so the v2 scripts keep it `False` to
