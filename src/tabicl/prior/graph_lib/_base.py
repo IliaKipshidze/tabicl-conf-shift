@@ -140,19 +140,72 @@ class Context:
         config: Optional[PriorConfig] = None,
         observed_classes: Optional[List[Any]] = None,
         seed: Optional[int] = None,
+        fit_n_samples: Optional[int] = None,
+        total_n_samples: Optional[int] = None,
     ):
+        if (fit_n_samples is None) != (total_n_samples is None):
+            raise ValueError(
+                "fit_n_samples and total_n_samples must either both be set or both be None"
+            )
+        if fit_n_samples is not None:
+            if (
+                not isinstance(fit_n_samples, (int, np.integer))
+                or isinstance(fit_n_samples, bool)
+                or not isinstance(total_n_samples, (int, np.integer))
+                or isinstance(total_n_samples, bool)
+            ):
+                raise TypeError("fit_n_samples and total_n_samples must be integers")
+            fit_n_samples = int(fit_n_samples)
+            total_n_samples = int(total_n_samples)
+            if not 0 < fit_n_samples <= total_n_samples:
+                raise ValueError(
+                    "fit_n_samples must satisfy 0 < fit_n_samples <= total_n_samples; "
+                    f"got fit_n_samples={fit_n_samples}, total_n_samples={total_n_samples}"
+                )
         self.device = device
         self.sampler = sampler or GlobalSampler(seed=seed, config=config)
         self.config = config or PriorConfig()
         self.observed_classes = observed_classes or []
+        self.fit_n_samples = fit_n_samples
+        self.total_n_samples = total_n_samples
         # could also add statistics for how often which class is used
+
+    def with_fit_boundary(self, fit_n_samples: int, total_n_samples: int) -> "Context":
+        """Return a context that fits sample-wise transformers on a row prefix.
+
+        Graph-U uses this to fit mechanisms and converters on support rows while
+        applying the resulting frozen transformations to support and query rows.
+        The sampler is intentionally shared so this does not resample the SCM.
+        """
+        return Context(
+            device=self.device,
+            sampler=self.sampler,
+            config=self.config,
+            observed_classes=self.observed_classes,
+            fit_n_samples=fit_n_samples,
+            total_n_samples=total_n_samples,
+        )
+
+    def without_fit_boundary(self) -> "Context":
+        """Return a context for auxiliary tensors that are not dataset rows."""
+        return Context(
+            device=self.device,
+            sampler=self.sampler,
+            config=self.config,
+            observed_classes=self.observed_classes,
+        )
 
     def get_recursion_context(self, obj: Any):
         cls = obj.__class__
         if cls in self.observed_classes:
             print(f"{cls=} is in {self.observed_classes=}, could have infinite recursion!")
         return Context(
-            device=self.device, sampler=self.sampler, config=self.config, observed_classes=self.observed_classes + [cls]
+            device=self.device,
+            sampler=self.sampler,
+            config=self.config,
+            observed_classes=self.observed_classes + [cls],
+            fit_n_samples=self.fit_n_samples,
+            total_n_samples=self.total_n_samples,
         )
 
 
@@ -190,9 +243,35 @@ class RandomTransformer(PriorComponent):
     def _transform(self, *args, **kwargs) -> Any:
         raise NotImplementedError()
 
+    def _fit_value(self, value: Any) -> Any:
+        """Restrict dataset-row tensors to the configured fit prefix.
+
+        Only tensors whose first dimension is the complete dataset length are
+        sliced. This leaves parameter and auxiliary tensors untouched. Lists,
+        tuples, and dictionaries are traversed because graph nodes receive a
+        list of parent tensors.
+        """
+        fit_n_samples = self.context.fit_n_samples
+        total_n_samples = self.context.total_n_samples
+        if fit_n_samples is None or total_n_samples is None:
+            return value
+        if isinstance(value, torch.Tensor):
+            if value.ndim > 0 and value.shape[0] == total_n_samples:
+                return value[:fit_n_samples]
+            return value
+        if isinstance(value, list):
+            return [self._fit_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._fit_value(item) for item in value)
+        if isinstance(value, dict):
+            return {key: self._fit_value(item) for key, item in value.items()}
+        return value
+
     def __call__(self, *args, **kwargs) -> Any:
         if not self.fitted:
-            self._fit(*args, **kwargs)
+            fit_args = tuple(self._fit_value(arg) for arg in args)
+            fit_kwargs = {key: self._fit_value(value) for key, value in kwargs.items()}
+            self._fit(*fit_args, **fit_kwargs)
             self.fitted = True
         return self._transform(*args, **kwargs)
 
@@ -242,7 +321,7 @@ class FeatureSpec:
     """
     def __init__(self, *, group: str = "x", cat_size: int = 0):
         if "_" in group:
-            raise ValueError(f"group must not contain an underscore")  # we'll use names of the form {group}_{name}
+            raise ValueError("group must not contain an underscore")  # we'll use names of the form {group}_{name}
         self.group = group
         self.cat_size = cat_size
 

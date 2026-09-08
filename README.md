@@ -376,13 +376,13 @@ Classification and regression use different TabICL output heads and training obj
 evaluate them as separate checkpoints and commands; the evaluator detects the checkpoint type and
 rejects a mixed list.
 
-> **Known pairing limitation:** the current `graph_scm` generator fits some mechanisms/converters
-> and final scaling using the combined support and query rows. Consequently, changing only query
-> `U` can also change the returned support `X` and sometimes support `y`, even with the same seed.
-> For classification, shift-dependent validation may also reject that SCM and accept a different
-> one. Checkpoints still receive byte-identical tasks within each condition (verified by stored
-> hashes), but comparisons between conditions are distribution-level comparisons, not strict
-> fixed-support, same-SCM counterfactual pairs.
+> **Pairing note:** Graph-U fits graph mechanisms, converters, final preprocessing, active-feature
+> selection, and optional filtering on support rows only. Therefore, same-seed identity and shifted
+> realizations of one accepted SCM have byte-identical returned support tensors. Classification
+> validation still examines query labels, however, so one condition can reject that realization and
+> accept a later SCM. Checkpoints receive byte-identical tasks within each condition (verified by
+> stored hashes), while classification comparisons across conditions are not yet guaranteed strict
+> same-SCM counterfactual pairs.
 
 A note on the v2 training: the paper reports using cautious weight decay, which is
 available via `--use_cautious_wd`, but the released checkpoints were trained with it left `False`

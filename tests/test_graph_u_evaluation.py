@@ -287,16 +287,32 @@ def test_task_generation_is_reproducible_and_restores_rng_state():
 
 
 def test_task_generation_rejects_impossible_classification_split():
-    with pytest.raises(ValueError, match="each be at least num_classes"):
+    with pytest.raises(ValueError, match="each be at least 2"):
         generate_task(
             task_type="classification",
             prior_config=PriorConfig(),
-            support_size=3,
+            support_size=1,
             query_size=10,
             num_features=2,
             num_classes=4,
             seed=1,
         )
+
+
+def test_requested_class_capacity_may_exceed_split_size():
+    task = generate_task(
+        task_type="classification",
+        prior_config=PriorConfig(),
+        support_size=2,
+        query_size=2,
+        num_features=2,
+        num_classes=4,
+        seed=1,
+    )
+
+    assert task.train_size == 2
+    assert len(torch.unique(task.y[:2])) == 2
+    assert set(task.y[:2].tolist()) == set(task.y[2:].tolist())
 
 
 class _RecordingClassifier:

@@ -98,7 +98,10 @@ class CategoricalSoftmaxDiscretizer(Converter):
         self.n_values = n_values
 
     def _fit(self, x: torch.Tensor):
-        self.embeddings_ = RandomPoints(self.context).sample(self.n_values, self.n_values)
+        # Category embeddings are auxiliary points, not dataset rows. Do not
+        # mistake an equal first dimension for the support/query sample axis.
+        embedding_context = self.context.without_fit_boundary()
+        self.embeddings_ = RandomPoints(embedding_context).sample(self.n_values, self.n_values)
         self.standardize_ = Standardize(self.context)
         self.bias_ = torch.log(RandomWeights(self.context).sample(1, x.shape[1]) + 1e-4)
         self.factor_ = self.sampler.numerical("softmax_disc_factor", 0.1, 10, use_log=True)

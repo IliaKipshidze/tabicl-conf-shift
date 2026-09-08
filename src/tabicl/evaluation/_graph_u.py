@@ -511,12 +511,9 @@ def generate_task(
         raise ValueError("support_size, query_size, and num_features must be positive")
     if task_type == "classification" and num_classes < 2:
         raise ValueError("Classification evaluation requires num_classes >= 2")
-    if task_type == "classification" and (
-        support_size < num_classes or query_size < num_classes
-    ):
+    if task_type == "classification" and (support_size < 2 or query_size < 2):
         raise ValueError(
-            "Classification requires support_size and query_size to each be at "
-            f"least num_classes ({num_classes}) so every class can appear in both splits"
+            "Classification requires support_size and query_size to each be at least 2"
         )
 
     regression = task_type == "regression"
@@ -809,12 +806,9 @@ def evaluate(
     task_type = next(iter(task_types))
     if task_type == "classification" and num_classes < 2:
         raise ValueError("Classification evaluation requires num_classes >= 2")
-    if task_type == "classification" and (
-        support_size < num_classes or query_size < num_classes
-    ):
+    if task_type == "classification" and (support_size < 2 or query_size < 2):
         raise ValueError(
-            "Classification requires support_size and query_size to each be at "
-            f"least num_classes ({num_classes}) so every class can appear in both splits"
+            "Classification requires support_size and query_size to each be at least 2"
         )
     if softmax_temperature <= 0 or not math.isfinite(softmax_temperature):
         raise ValueError("softmax_temperature must be finite and positive")
@@ -921,12 +915,13 @@ def evaluate(
             torch.cuda.empty_cache()
 
     pairing_caveat = (
-        "Evaluation conditions are distribution-level samples, not paired-SCM "
-        "counterfactuals. Current graph_scm fits some mechanisms/converters and "
-        "final scaling on combined support+query rows, so changing query U can "
-        "change returned support X/y. In classification, shift-dependent split "
-        "validation can also reject an SCM and accept a different one under the "
-        "same seed. Checkpoints are still exactly paired within each condition."
+        "Graph-U mechanisms, converters, final preprocessing, feature retention, "
+        "and optional dataset filtering are fitted on support rows only. Thus a "
+        "same-seed identity/shift realization preserves support while changing "
+        "query U. Classification conditions are still distribution-level rather "
+        "than guaranteed paired-SCM counterfactuals: shift-dependent class-split "
+        "validation can reject one realization and accept a later SCM under the "
+        "same seed. Checkpoints are exactly paired within each condition."
     )
     reconstruction = prior_reconstruction_details(reference)
     warnings = [pairing_caveat]

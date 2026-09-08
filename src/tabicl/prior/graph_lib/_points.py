@@ -41,7 +41,8 @@ class RandomPoints(PriorComponent):
             )
 
             # Fit and apply exactly one root function to the combined support-query tensor.
-            return RandomFunction(self.context, n, n)(points)
+            root_context = self.context.with_fit_boundary(graph_u_n_train, n_batch)
+            return RandomFunction(root_context, n, n)(points)
 
         base_points = self.sampler.choice(
             "random_base_points",

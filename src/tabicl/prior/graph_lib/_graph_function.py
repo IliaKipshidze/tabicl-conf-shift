@@ -77,16 +77,22 @@ class RandomGraphFunction(RandomTransformer):
 
     def _fit(self, n_samples: int):
         self._validate_graph_u_boundary(n_samples)
+        self._graph_u_was_transformed = False
+        node_context = (
+            self.context.with_fit_boundary(self.n_train, n_samples)
+            if self.config.graph_u_enabled
+            else self.context
+        )
         self.nodes_ = []
         for node_idx, feature_specs in enumerate(self.node_feature_specs):
             if node_idx == self.graph_u_node_idx:
                 node = RandomNodeFunction(
-                    self.context,
+                    node_context,
                     feature_specs=feature_specs,
                     graph_u_n_train=self.n_train,
                 )
             else:
-                node = RandomNodeFunction(self.context, feature_specs=feature_specs)
+                node = RandomNodeFunction(node_context, feature_specs=feature_specs)
             self.nodes_.append(node)
         # for efficiency, prune nodes whose values don't need to be computed
         self.should_compute_ = [False for _ in range(len(self.nodes_))]
@@ -104,6 +110,13 @@ class RandomGraphFunction(RandomTransformer):
 
     def _transform(self, n_samples: int) -> Dict[str, torch.Tensor]:
         self._validate_graph_u_boundary(n_samples)
+        if self.config.graph_u_enabled:
+            if self._graph_u_was_transformed:
+                raise RuntimeError(
+                    "A fitted Graph-U graph function cannot be evaluated twice because "
+                    "root sources and root-level functions would be resampled"
+                )
+            self._graph_u_was_transformed = True
         n_nodes = len(self.node_feature_specs)
         node_values = [None for _ in range(n_nodes)]
         features = dict()

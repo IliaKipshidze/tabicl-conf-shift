@@ -1,16 +1,16 @@
 from __future__ import annotations
+
 from numbers import Integral
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
+from ._reg2cls import outlier_removing, standard_scaling
 from .graph_lib._base import Context, DatasetProperties
 from .graph_lib._config import PriorConfig
-from .graph_lib._properties import sample_categorical_sizes
 from .graph_lib._dataset import RandomDataset
-
-from ._reg2cls import standard_scaling, outlier_removing
+from .graph_lib._properties import sample_categorical_sizes
 
 
 class GraphSCM:
@@ -119,7 +119,9 @@ class GraphSCM:
     def __call__(self) -> None:
         """Generate a dataset and return features and target."""
 
-        context = Context(config=self.config, device=self.device)
+        self.invalid_generation_ = False
+        config = self.config or PriorConfig()
+        context = Context(config=config, device=self.device)
         n_train = self.seq_len if self.train_size is None else self.train_size
         properties = DatasetProperties(
             n_train=n_train,
@@ -145,8 +147,9 @@ class GraphSCM:
         else:
             raise ValueError("No features found in dataset")
 
-        X = outlier_removing(X.float(), threshold=4)
-        X = standard_scaling(X)
+        fit_size = n_train if config.graph_u_enabled else None
+        X = outlier_removing(X.float(), threshold=4, fit_size=fit_size)
+        X = standard_scaling(X, fit_size=fit_size)
 
         if self.permute_features:
             feat_perm = torch.randperm(self.num_features, device=self.device)
@@ -159,8 +162,8 @@ class GraphSCM:
 
         if self.regression:
             y = data["y_num"]  # (seq_len, 1)
-            y = outlier_removing(y.float(), threshold=4)
-            y = standard_scaling(y)
+            y = outlier_removing(y.float(), threshold=4, fit_size=fit_size)
+            y = standard_scaling(y, fit_size=fit_size)
             y = y.view(-1)  # (seq_len,)
         else:
             y = data["y_cat"].view(-1)  # (seq_len,)
@@ -168,7 +171,21 @@ class GraphSCM:
                 class_perm = torch.randperm(self.num_classes, device=self.device)
                 y = class_perm[y.long()]
 
-        if torch.any(torch.isnan(X)) or torch.any(torch.isnan(y)):
+        has_non_finite = not torch.all(torch.isfinite(X)) or not torch.all(
+            torch.isfinite(y)
+        )
+        if config.graph_u_enabled and has_non_finite:
+            self.invalid_generation_ = True
+            # A query-side numerical failure must never overwrite unchanged
+            # support rows. The outer graph prior rejects this entire attempt.
+            for row_slice in (slice(0, n_train), slice(n_train, self.seq_len)):
+                if not torch.all(torch.isfinite(X[row_slice])) or not torch.all(
+                    torch.isfinite(y[row_slice])
+                ):
+                    X[row_slice] = 0
+                    y[row_slice] = -100.0
+        elif has_non_finite:
+            self.invalid_generation_ = True
             X = torch.zeros_like(X)
             y = torch.full_like(y, -100.0)
 

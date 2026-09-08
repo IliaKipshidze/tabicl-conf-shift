@@ -307,7 +307,11 @@ class Prior:
             return 10
 
     @staticmethod
-    def delete_unique_features(X: Tensor, d: Tensor) -> Tuple[Tensor, Tensor]:
+    def delete_unique_features(
+        X: Tensor,
+        d: Tensor,
+        fit_size: Optional[int] = None,
+    ) -> Tuple[Tensor, Tensor]:
         """
         Removes features that have only one unique value across all samples.
 
@@ -328,6 +332,10 @@ class Prior:
             Number of features per dataset of shape (B,), indicating how many
             features are actually used in each dataset (rest is padding)
 
+        fit_size : int | None, optional
+            If set, decide which features are constant from this leading row
+            prefix, then apply the resulting feature mask to every row.
+
         Returns
         -------
         tuple
@@ -335,14 +343,25 @@ class Prior:
             - X_new is the filtered tensor with non-informative features removed
             - d_new is the updated feature count per dataset
         """
+        if fit_size is not None:
+            if not isinstance(fit_size, (int, np.integer)) or isinstance(
+                fit_size, bool
+            ):
+                raise TypeError("fit_size must be an integer or None")
+            fit_size = int(fit_size)
+            if not 0 < fit_size <= X.shape[1]:
+                raise ValueError(
+                    f"fit_size must be between 1 and {X.shape[1]}, got {fit_size}"
+                )
 
         def filter_unique_features(xi: Tensor, di: int) -> Tuple[Tensor, Tensor]:
             """Filters features with only one unique value from a single dataset."""
             num_features = xi.shape[-1]
             # Only consider actual features (up to di, ignoring padding)
             xi = xi[:, :di]
-            # Identify features with more than one unique value (informative features)
-            unique_mask = [len(torch.unique(xi[:, j])) > 1 for j in range(di)]
+            fit_xi = xi if fit_size is None else xi[:fit_size]
+            # Identify features with more than one support value (informative features)
+            unique_mask = [len(torch.unique(fit_xi[:, j])) > 1 for j in range(di)]
             di_new = sum(unique_mask)
             # Create new tensor with only informative features, padding the rest
             xi_new = F.pad(xi[:, unique_mask], pad=(0, num_features - di_new), mode="constant", value=0)
@@ -993,6 +1012,7 @@ class GraphPrior(Prior):
             max_attempts = self.config.graph_u_max_attempts
         attempt = 0
         rejection_counts = {
+            "non_finite_values": 0,
             "no_active_features": 0,
             "invalid_class_split": 0,
             "dataset_filter": 0,
@@ -1005,14 +1025,19 @@ class GraphPrior(Prior):
                     f"rejections={rejection_counts}"
                 )
             attempt += 1
-            X, y = GraphSCM(**params)()
+            scm = GraphSCM(**params)
+            X, y = scm()
+            if getattr(scm, "invalid_generation_", False):
+                rejection_counts["non_finite_values"] += 1
+                continue
 
             # Add batch dim for single dataset to be compatible with delete_unique_features and sanity_check
             X, y = X.unsqueeze(0), y.unsqueeze(0)
             d = torch.tensor([params["num_features"]], device=self.device, dtype=torch.long)
 
             # Only keep valid datasets with sufficient features and balanced classes
-            X, d = self.delete_unique_features(X, d)
+            fit_size = params["train_size"] if self.config.graph_u_enabled else None
+            X, d = self.delete_unique_features(X, d, fit_size=fit_size)
             if not (d > 0).all():
                 rejection_counts["no_active_features"] += 1
                 continue
@@ -1029,7 +1054,14 @@ class GraphPrior(Prior):
                 rejection_counts["invalid_class_split"] += 1
                 continue
 
-            if should_filter(X[0], y[0], self.config, is_classif=not self.regression):
+            filter_X = X[0] if fit_size is None else X[0, :fit_size]
+            filter_y = y[0] if fit_size is None else y[0, :fit_size]
+            if should_filter(
+                filter_X,
+                filter_y,
+                self.config,
+                is_classif=not self.regression,
+            ):
                 rejection_counts["dataset_filter"] += 1
                 continue
 

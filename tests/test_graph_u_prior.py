@@ -13,9 +13,11 @@ from tabicl.prior import _dataset as prior_dataset_module
 from tabicl.prior import _graph_scm as graph_scm_module
 from tabicl.prior._dataset import GraphPrior, Prior, PriorDataset
 from tabicl.prior._graph_scm import GraphSCM
+from tabicl.prior._reg2cls import outlier_removing, standard_scaling
 from tabicl.prior.graph_lib import _dataset as dataset_module
 from tabicl.prior.graph_lib import _function as function_module
 from tabicl.prior.graph_lib import _graph_function as graph_function_module
+from tabicl.prior.graph_lib._activation import Standardize
 from tabicl.prior.graph_lib._base import (
     Context,
     Dataset,
@@ -175,6 +177,28 @@ def test_graph_u_affine_shift_also_supports_non_gaussian_sources(monkeypatch):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_direct_graph_u_points_fit_root_function_on_support_only():
+    def generate(query_location: float, query_scale: float) -> torch.Tensor:
+        np.random.seed(91)
+        torch.manual_seed(91)
+        config = PriorConfig(
+            graph_u_enabled=True,
+            graph_u_query_location=query_location,
+            graph_u_query_scale=query_scale,
+            graph_u_force_gaussian=True,
+            fct_types="tree",
+        )
+        return RandomPoints(Context(config=config)).sample(
+            20, 3, graph_u_n_train=12
+        )
+
+    identity = generate(0.0, 1.0)
+    shifted = generate(4.0, 2.0)
+
+    torch.testing.assert_close(identity[:12], shifted[:12], rtol=0, atol=0)
+    assert not torch.equal(identity[12:], shifted[12:])
+
+
 @pytest.mark.parametrize("graph_u_n_train", [-1, 0, 8, 9])
 def test_graph_u_rejects_invalid_support_query_boundary(graph_u_n_train):
     points = RandomPoints(Context(config=PriorConfig(graph_u_enabled=True)))
@@ -247,6 +271,110 @@ def test_graph_u_cli_config_round_trip():
 
 def test_graph_u_does_not_force_gaussian_by_default():
     assert PriorConfig().graph_u_force_gaussian is False
+
+
+def test_graph_u_lazy_transformers_fit_on_support_only():
+    context = Context(config=PriorConfig(graph_u_enabled=True)).with_fit_boundary(4, 6)
+    support = torch.tensor([[0.0], [1.0], [2.0], [3.0]])
+    first = torch.cat([support, torch.tensor([[4.0], [5.0]])])
+    second = torch.cat([support, torch.tensor([[4000.0], [5000.0]])])
+
+    first_result = Standardize(context)(first)
+    second_result = Standardize(
+        Context(config=PriorConfig(graph_u_enabled=True)).with_fit_boundary(4, 6)
+    )(second)
+
+    torch.testing.assert_close(first_result[:4], second_result[:4], rtol=0, atol=0)
+    assert not torch.equal(first_result[4:], second_result[4:])
+
+
+def test_graph_u_final_preprocessing_fits_both_passes_on_support_only():
+    support = torch.tensor([[0.0], [0.0], [0.0], [100.0]])
+    first = torch.cat([support, torch.tensor([[0.0], [0.0]])])
+    second = torch.cat([support, torch.tensor([[1000.0], [1000.0]])])
+
+    first_clipped = outlier_removing(first, threshold=1, fit_size=4)
+    second_clipped = outlier_removing(second, threshold=1, fit_size=4)
+    first_scaled = standard_scaling(first_clipped, fit_size=4)
+    second_scaled = standard_scaling(second_clipped, fit_size=4)
+
+    torch.testing.assert_close(first_clipped[:4], second_clipped[:4], rtol=0, atol=0)
+    torch.testing.assert_close(first_scaled[:4], second_scaled[:4], rtol=0, atol=0)
+    assert not torch.equal(first_scaled[4:], second_scaled[4:])
+
+
+def test_graph_u_feature_retention_is_decided_from_support_only():
+    support = torch.tensor([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0]])
+    first = torch.cat([support, torch.tensor([[1.0, 4.0], [1.0, 5.0]])])
+    second = torch.cat([support, torch.tensor([[10.0, 4.0], [20.0, 5.0]])])
+    d = torch.tensor([2])
+
+    first_result, first_d = Prior.delete_unique_features(
+        first.unsqueeze(0), d, fit_size=4
+    )
+    second_result, second_d = Prior.delete_unique_features(
+        second.unsqueeze(0), d, fit_size=4
+    )
+
+    assert first_d.item() == second_d.item() == 1
+    torch.testing.assert_close(
+        first_result[0, :4], second_result[0, :4], rtol=0, atol=0
+    )
+    torch.testing.assert_close(first_result[0, :, 0], first[:, 1], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "regression,fct_types",
+    [
+        (False, "default"),
+        (True, "default"),
+        (True, "tree"),
+        (True, "disc"),
+        (True, "em"),
+        (True, "mlp"),
+        (True, "prod"),
+    ],
+)
+def test_same_seed_graph_u_shift_preserves_final_support(regression, fct_types):
+    def generate(query_location: float, query_scale: float):
+        np.random.seed(7)
+        torch.manual_seed(7)
+        config = PriorConfig(
+            graph_u_enabled=True,
+            graph_u_query_location=query_location,
+            graph_u_query_scale=query_scale,
+            graph_u_force_gaussian=True,
+            graph_u_max_attempts=1000,
+            min_n_nodes=3,
+            max_n_nodes=8,
+            fct_types=fct_types,
+        )
+        scm = GraphSCM(
+            regression=regression,
+            seq_len=48,
+            train_size=32,
+            num_features=4,
+            max_features=4,
+            num_classes=3,
+            permute_features=False,
+            permute_labels=False,
+            config=config,
+        )
+        X, y = scm()
+        return X, y, scm.metadata_
+
+    identity_X, identity_y, identity_metadata = generate(0.0, 1.0)
+    shifted_X, shifted_y, shifted_metadata = generate(3.0, 1.7)
+
+    assert identity_metadata["graph"] == shifted_metadata["graph"]
+    assert identity_metadata["graph_u_node_idx"] == shifted_metadata["graph_u_node_idx"]
+    assert identity_metadata["graph_u_fit_policy"] == "support_only"
+    torch.testing.assert_close(identity_X[:32], shifted_X[:32], rtol=0, atol=0)
+    torch.testing.assert_close(identity_y[:32], shifted_y[:32], rtol=0, atol=0)
+    assert not (
+        torch.equal(identity_X[32:], shifted_X[32:])
+        and torch.equal(identity_y[32:], shifted_y[32:])
+    )
 
 
 def test_graph_u_requires_graph_scm_prior_type():
@@ -343,6 +471,87 @@ def test_graph_scm_propagates_train_size_and_retains_metadata(monkeypatch):
     assert scm.metadata_["sentinel"] == "metadata"
 
 
+class _QueryNaNRandomDataset:
+    def __init__(self, _context):
+        pass
+
+    def sample(self, properties: DatasetProperties):
+        n_samples = properties.n_train + properties.n_test
+        X = torch.arange(n_samples, dtype=torch.float32).unsqueeze(-1)
+        X[properties.n_train] = torch.nan
+        y = torch.arange(n_samples, dtype=torch.float32).unsqueeze(-1)
+        return Dataset(
+            tensors={"x_0": X, "y_0": y},
+            feature_specs=properties.feature_specs,
+        )
+
+
+def test_graph_scm_marks_query_nan_invalid_without_overwriting_support(monkeypatch):
+    monkeypatch.setattr(graph_scm_module, "RandomDataset", _QueryNaNRandomDataset)
+    scm = GraphSCM(
+        regression=True,
+        seq_len=6,
+        train_size=4,
+        num_features=1,
+        max_features=1,
+        permute_features=False,
+        config=PriorConfig(graph_u_enabled=True, max_n_nodes=3),
+    )
+
+    X, y = scm()
+
+    assert scm.invalid_generation_ is True
+    assert not torch.all(X[:4] == 0)
+    assert not torch.any(y[:4] == -100)
+    torch.testing.assert_close(X[4:], torch.zeros(2, 1))
+    torch.testing.assert_close(y[4:], torch.full((2,), -100.0))
+
+
+def test_graph_prior_retries_graph_scm_marked_invalid(monkeypatch):
+    class InvalidOnceGraphSCM:
+        calls = 0
+
+        def __init__(self, **_kwargs):
+            self.invalid_generation_ = False
+
+        def __call__(self):
+            self.__class__.calls += 1
+            self.invalid_generation_ = self.__class__.calls == 1
+            X = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+            y = torch.arange(6, dtype=torch.float32)
+            if self.invalid_generation_:
+                X[4:] = 0
+                y[4:] = -100
+            return X, y
+
+    monkeypatch.setattr(prior_dataset_module, "GraphSCM", InvalidOnceGraphSCM)
+    InvalidOnceGraphSCM.calls = 0
+    config = PriorConfig(graph_u_enabled=True, max_n_nodes=3)
+    prior = GraphPrior(
+        regression=True,
+        config=config,
+        n_jobs=1,
+        generation_max_attempts=2,
+    )
+    params = {
+        "regression": True,
+        "seq_len": 6,
+        "train_size": 4,
+        "num_features": 2,
+        "max_features": 2,
+        "num_classes": None,
+        "device": "cpu",
+        "config": config,
+    }
+
+    X, y, d = prior.generate_dataset(params)
+
+    assert InvalidOnceGraphSCM.calls == 2
+    assert d.item() == 2
+    torch.testing.assert_close(X, torch.arange(12, dtype=torch.float32).reshape(6, 2))
+    torch.testing.assert_close(y, torch.arange(6, dtype=torch.float32))
+
+
 def test_graph_prior_bounds_outer_retries_and_preserves_environment_boundary(
     monkeypatch,
 ):
@@ -389,6 +598,55 @@ def test_graph_prior_bounds_outer_retries_and_preserves_environment_boundary(
 
     assert AlwaysInvalidGraphSCM.calls == 2
     assert allow_permutation == [False, False]
+
+
+def test_graph_u_optional_dataset_filter_receives_support_only(monkeypatch):
+    class FixedGraphSCM:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self):
+            X = torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [1.0, 1.0],
+                    [2.0, 2.0],
+                    [3.0, 3.0],
+                    [1000.0, 1000.0],
+                    [2000.0, 2000.0],
+                ]
+            )
+            y = torch.arange(6, dtype=torch.float32)
+            return X, y
+
+    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def record_filter(X, y, *_args, **_kwargs):
+        seen.append((X.clone(), y.clone()))
+        return False
+
+    monkeypatch.setattr(prior_dataset_module, "GraphSCM", FixedGraphSCM)
+    monkeypatch.setattr(prior_dataset_module, "should_filter", record_filter)
+    config = PriorConfig(graph_u_enabled=True, max_n_nodes=3)
+    prior = GraphPrior(regression=True, config=config, n_jobs=1)
+    params = {
+        "regression": True,
+        "seq_len": 6,
+        "train_size": 4,
+        "num_features": 2,
+        "max_features": 2,
+        "num_classes": None,
+        "device": "cpu",
+        "config": config,
+    }
+
+    prior.generate_dataset(params)
+
+    assert len(seen) == 1
+    assert seen[0][0].shape == (4, 2)
+    assert seen[0][1].shape == (4,)
+    torch.testing.assert_close(seen[0][0], FixedGraphSCM()()[0][:4])
+    torch.testing.assert_close(seen[0][1], FixedGraphSCM()()[1][:4])
 
 
 def test_evaluator_can_bound_ordinary_graph_prior_retries(monkeypatch):
@@ -560,11 +818,15 @@ def test_random_dataset_records_selected_graph_u_and_shift_config(monkeypatch):
 
 class _DeterministicNodeFunction:
     boundaries: list[int | None] = []
+    fit_boundaries: list[tuple[int | None, int | None]] = []
 
     def __init__(self, _context, feature_specs, *, graph_u_n_train=None):
         self.feature_specs = feature_specs
         self.graph_u_n_train = graph_u_n_train
         self.__class__.boundaries.append(graph_u_n_train)
+        self.__class__.fit_boundaries.append(
+            (_context.fit_n_samples, _context.total_n_samples)
+        )
 
     def __call__(self, parents: list[torch.Tensor], n_samples: int):
         if not parents:
@@ -581,6 +843,7 @@ def test_graph_u_source_shift_propagates_through_all_descendants(monkeypatch):
         graph_function_module, "RandomNodeFunction", _DeterministicNodeFunction
     )
     _DeterministicNodeFunction.boundaries.clear()
+    _DeterministicNodeFunction.fit_boundaries.clear()
     graph = [[], [0], [0], [2]]
     node_feature_specs = [
         {},
@@ -599,6 +862,7 @@ def test_graph_u_source_shift_propagates_through_all_descendants(monkeypatch):
     features = graph_function(4)
 
     assert _DeterministicNodeFunction.boundaries == [2, None, None, None]
+    assert _DeterministicNodeFunction.fit_boundaries == [(2, 4)] * 4
     torch.testing.assert_close(
         features["x_0"].squeeze(-1), torch.tensor([1.0, 2.0, 103.0, 104.0])
     )
@@ -609,6 +873,9 @@ def test_graph_u_source_shift_propagates_through_all_descendants(monkeypatch):
         features["x_descendant"].squeeze(-1),
         torch.tensor([2.0, 3.0, 104.0, 105.0]),
     )
+
+    with pytest.raises(RuntimeError, match="cannot be evaluated twice"):
+        graph_function(4)
 
 
 @pytest.mark.parametrize(

@@ -140,13 +140,15 @@ to the generated dataset or saved by the normal prior API.
 
 `ensure_iid=True` is intentionally rejected with Graph-U in this version,
 because TabICL's extra evaluation pass currently resamples root-level
-mechanisms. Also note that some original TabICL transformations are fitted on
-the combined support/query tensor; the intervention is shared within an
-episode, but this first implementation does not make those transformations
-independent of the sampled environments. Consequently, same-seed identity and
-shift tasks select the same graph and U, but their support tensors are not
-guaranteed to be identical. Use the Graph-U identity condition as the matched
-control; a stricter support-only mechanism-fitting variant is future work.
+mechanisms. Graph-U instead uses one combined graph pass while fitting every
+data-dependent graph mechanism and converter on support rows only. The frozen
+transformations are then applied to both environments. Final outlier removal,
+scaling, active-feature selection, and optional dataset filtering also use only
+support rows. Consequently, resetting the RNG to the same seed for identity and
+shift conditions preserves the returned support tensors while the intervention
+changes query U and propagates through its descendants. Classification
+evaluation can still select different SCMs after a condition-specific class
+split rejection, so such condition streams are not guaranteed paired SCMs.
 
 Per-task structural metadata, including the selected U and its observed
 children, is available as `GraphSCM.metadata_` after direct generation. The

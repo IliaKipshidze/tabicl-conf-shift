@@ -190,4 +190,5 @@ class RandomDataset(PriorComponent):
             graph_u_y_child_node_idxs=tuple(graph_u_y_child_node_idxs),
             graph_u_attempts=n_attempts,
             graph_u_config=graph_u_config,
+            graph_u_fit_policy="support_only" if graph_u_enabled else None,
         )

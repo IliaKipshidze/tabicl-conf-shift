@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import random
 import warnings
+from numbers import Integral
+from typing import Optional
 
 import numpy as np
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import Tensor, nn
 
 
 def torch_nanstd(input, dim=None, keepdim=False, ddof=0, *, dtype=None) -> Tensor:
@@ -44,7 +46,26 @@ def torch_nanstd(input, dim=None, keepdim=False, ddof=0, *, dtype=None) -> Tenso
     return torch.from_numpy(std).to(dtype=torch.float, device=device)
 
 
-def standard_scaling(input: Tensor, clip_value: float = 100) -> Tensor:
+def _fit_rows(input: Tensor, fit_size: Optional[int]) -> Tensor:
+    """Return rows used to fit a transformation, validating an optional prefix."""
+    if fit_size is None:
+        return input
+    if not isinstance(fit_size, Integral) or isinstance(fit_size, bool):
+        raise TypeError("fit_size must be an integer or None")
+    fit_size = int(fit_size)
+    if not 0 < fit_size <= input.shape[0]:
+        raise ValueError(
+            f"fit_size must be between 1 and {input.shape[0]}, got {fit_size}"
+        )
+    return input[:fit_size]
+
+
+def standard_scaling(
+    input: Tensor,
+    clip_value: float = 100,
+    *,
+    fit_size: Optional[int] = None,
+) -> Tensor:
     """Standardizes features by removing the mean and scaling to unit variance.
 
     NaNs are ignored in mean/std calculation.
@@ -57,19 +78,34 @@ def standard_scaling(input: Tensor, clip_value: float = 100) -> Tensor:
     clip_value : float, optional, default=100
         The value to clip the standardized input to, preventing extreme outliers.
 
+    fit_size : int | None, optional
+        If set, fit the mean and standard deviation on this leading row prefix
+        and apply the frozen transformation to every row. ``None`` preserves
+        the original all-row behavior.
+
     Returns
     -------
     Tensor
         The standardized input, clipped between -clip_value and clip_value.
     """
-    mean = torch.nanmean(input, dim=0)
-    std = torch_nanstd(input, dim=0, ddof=1 if input.shape[0] > 1 else 0).clip(min=1e-6)
+    fit_input = _fit_rows(input, fit_size)
+    mean = torch.nanmean(fit_input, dim=0)
+    std = torch_nanstd(
+        fit_input,
+        dim=0,
+        ddof=1 if fit_input.shape[0] > 1 else 0,
+    ).clip(min=1e-6)
     scaled_input = (input - mean) / std
 
     return torch.clip(scaled_input, min=-clip_value, max=clip_value)
 
 
-def outlier_removing(input: Tensor, threshold: float = 4.0) -> Tensor:
+def outlier_removing(
+    input: Tensor,
+    threshold: float = 4.0,
+    *,
+    fit_size: Optional[int] = None,
+) -> Tensor:
     """Clamps outliers in the input tensor based on a specified number of standard deviations (threshold).
 
     Parameters
@@ -80,24 +116,39 @@ def outlier_removing(input: Tensor, threshold: float = 4.0) -> Tensor:
     threshold : float, optional, default=4.0
         Number of standard deviations to use as the cutoff.
 
+    fit_size : int | None, optional
+        If set, derive both rounds of clipping bounds from this leading row
+        prefix and apply those bounds to every row. ``None`` preserves the
+        original all-row behavior.
+
     Returns
     -------
     Tensor
         The tensor with outliers clamped.
     """
-    # First stage: Identify outliers using initial statistics
-    mean = torch.nanmean(input, dim=0)
-    std = torch_nanstd(input, dim=0, ddof=1 if input.shape[0] > 1 else 0).clip(min=1e-6)
+    fit_input = _fit_rows(input, fit_size)
+
+    # First stage: Identify outliers using fit-row statistics
+    mean = torch.nanmean(fit_input, dim=0)
+    std = torch_nanstd(
+        fit_input,
+        dim=0,
+        ddof=1 if fit_input.shape[0] > 1 else 0,
+    ).clip(min=1e-6)
     cut_off = std * threshold
     lower, upper = mean - cut_off, mean + cut_off
 
     # Create mask for non-outlier, non-NaN values
-    mask = (lower <= input) & (input <= upper) & ~torch.isnan(input)
+    mask = (lower <= fit_input) & (fit_input <= upper) & ~torch.isnan(fit_input)
 
     # Second pass using only non-outlier values for mean/std
-    masked_input = torch.where(mask, input, torch.nan)
+    masked_input = torch.where(mask, fit_input, torch.nan)
     masked_mean = torch.nanmean(masked_input, dim=0)
-    masked_std = torch_nanstd(masked_input, dim=0, ddof=1 if input.shape[0] > 1 else 0).clip(min=1e-6)
+    masked_std = torch_nanstd(
+        masked_input,
+        dim=0,
+        ddof=1 if fit_input.shape[0] > 1 else 0,
+    ).clip(min=1e-6)
 
     # Handle cases where a column had <= 1 valid value after masking -> std is NaN or 0
     masked_mean = torch.where(torch.isnan(masked_mean), mean, masked_mean)
