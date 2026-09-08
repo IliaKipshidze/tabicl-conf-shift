@@ -54,4 +54,3 @@ PY
 
 echo "Environment ready: ${ENV_PATH}"
 echo "CUDA availability will be checked again inside the GPU smoke job."
-

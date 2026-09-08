@@ -49,4 +49,3 @@ python -u scripts/smoke_graph_u.py \
     --datasets "${GRAPH_U_DATASETS}" \
     --query-location "${GRAPH_U_QUERY_LOCATION}" \
     --query-scale "${GRAPH_U_QUERY_SCALE}"
-
