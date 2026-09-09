@@ -25,7 +25,11 @@ from tabicl.prior.graph_lib._base import (
     FeatureSpec,
 )
 from tabicl.prior.graph_lib._config import PriorConfig
-from tabicl.prior.graph_lib._dataset import RandomDataset, find_graph_u_candidates
+from tabicl.prior.graph_lib._dataset import (
+    RandomDataset,
+    construct_graph_u_root,
+    find_graph_u_candidates,
+)
 from tabicl.prior.graph_lib._graph_function import RandomGraphFunction
 from tabicl.prior.graph_lib._points import (
     RandomGaussianPoints,
@@ -91,6 +95,59 @@ def test_find_graph_u_candidates_requires_hidden_root_with_distinct_direct_x_y_c
     graph, node_feature_specs, expected
 ):
     assert find_graph_u_candidates(graph, node_feature_specs) == expected
+
+
+def test_construct_graph_u_root_preserves_base_dag_and_feature_placement():
+    graph = [[], [0], [0, 1]]
+    node_feature_specs = [
+        _feature_specs("x"),
+        _feature_specs("x"),
+        _feature_specs("y"),
+    ]
+
+    augmented_graph, augmented_specs, x_child, y_child = construct_graph_u_root(
+        graph, node_feature_specs
+    )
+
+    assert augmented_graph[0] == []
+    assert augmented_specs[0] == {}
+    assert x_child != y_child
+    assert 0 in augmented_graph[x_child]
+    assert 0 in augmented_graph[y_child]
+    for base_idx, base_parents in enumerate(graph):
+        shifted_idx = base_idx + 1
+        forced_parent = [0] if shifted_idx in {x_child, y_child} else []
+        assert augmented_graph[shifted_idx] == [
+            *forced_parent,
+            *(parent_idx + 1 for parent_idx in base_parents),
+        ]
+        assert augmented_specs[shifted_idx] == node_feature_specs[base_idx]
+    assert find_graph_u_candidates(augmented_graph, augmented_specs)[0] == 0
+
+
+def test_construct_graph_u_root_repairs_single_shared_x_y_node_without_rejection():
+    graph = [[], [0]]
+    node_feature_specs = [
+        _feature_specs("x", "y"),
+        {},
+    ]
+
+    augmented_graph, augmented_specs, x_child, y_child = construct_graph_u_root(
+        graph, node_feature_specs
+    )
+
+    assert x_child == 2
+    assert y_child == 1
+    assert any(spec.group == "x" for spec in augmented_specs[x_child].values())
+    assert any(spec.group == "y" for spec in augmented_specs[y_child].values())
+    assert 0 in augmented_graph[x_child]
+    assert 0 in augmented_graph[y_child]
+    assert sum(
+        spec.group == "x" for node_specs in augmented_specs for spec in node_specs.values()
+    ) == 1
+    assert sum(
+        spec.group == "y" for node_specs in augmented_specs for spec in node_specs.values()
+    ) == 1
 
 
 class _IdentityRandomFunction:
@@ -335,12 +392,16 @@ def test_graph_u_feature_retention_is_decided_from_support_only():
         (True, "prod"),
     ],
 )
-def test_same_seed_graph_u_shift_preserves_final_support(regression, fct_types):
+@pytest.mark.parametrize("structure_mode", ["reject", "add_root"])
+def test_same_seed_graph_u_shift_preserves_final_support(
+    regression, fct_types, structure_mode
+):
     def generate(query_location: float, query_scale: float):
         np.random.seed(7)
         torch.manual_seed(7)
         config = PriorConfig(
             graph_u_enabled=True,
+            graph_u_structure_mode=structure_mode,
             graph_u_query_location=query_location,
             graph_u_query_scale=query_scale,
             graph_u_force_gaussian=True,
@@ -814,6 +875,66 @@ def test_random_dataset_records_selected_graph_u_and_shift_config(monkeypatch):
     assert dataset.kwargs["graph_u_config"]["graph_u_query_scale"] == 0.75
     assert dataset.kwargs["n_train"] == properties.n_train
     assert dataset.kwargs["n_test"] == properties.n_test
+
+
+class _FixedTwoNodeDAG:
+    calls = 0
+
+    def __init__(self, _context):
+        pass
+
+    def sample(self, n_nodes: int) -> list[list[int]]:
+        self.__class__.calls += 1
+        assert n_nodes == 2
+        return [[], [0]]
+
+
+def test_constructed_graph_u_handles_94_features_with_one_dag_proposal(monkeypatch):
+    monkeypatch.setattr(dataset_module, "RandomDAG", _FixedTwoNodeDAG)
+    monkeypatch.setattr(dataset_module, "RandomGraphFunction", _RecordingGraphFunction)
+    _FixedTwoNodeDAG.calls = 0
+    _RecordingGraphFunction.calls.clear()
+
+    original_choice = dataset_module.np.random.choice
+
+    def place_all_features_on_first_node(values, *args, **kwargs):
+        size = kwargs.get("size")
+        if size is not None:
+            return np.zeros(size, dtype=int)
+        return original_choice(values, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_module.np.random, "choice", place_all_features_on_first_node)
+    config = PriorConfig(
+        graph_u_enabled=True,
+        graph_u_structure_mode="add_root",
+        graph_u_max_attempts=1,
+        min_n_nodes=2,
+        max_n_nodes=2,
+        subsample_feature_nodes=False,
+        filter_unpredictable_graphs=True,
+    )
+    properties = DatasetProperties(
+        n_train=4,
+        n_test=2,
+        cat_sizes={"x": [0] * 94, "y": [2]},
+    )
+
+    dataset = RandomDataset(Context(config=config)).sample(properties)
+
+    assert _FixedTwoNodeDAG.calls == 1
+    assert dataset.kwargs["graph_u_attempts"] == 1
+    assert dataset.kwargs["graph_u_structure_mode"] == "add_root"
+    assert dataset.kwargs["graph_u_node_idx"] == 0
+    assert dataset.kwargs["graph_u_candidate_node_idxs"] == (0,)
+    assert dataset.kwargs["graph_u_base_n_nodes"] == 2
+    assert len(dataset.kwargs["graph"]) == 3
+    assert len(dataset.tensors) == 95
+
+    call = _RecordingGraphFunction.calls[-1]
+    assert call["graph_u_node_idx"] == 0
+    assert call["node_feature_specs"][0] == {}
+    assert call["graph_u_node_idx"] in call["dag"][dataset.kwargs["graph_u_constructed_x_child_node_idx"]]
+    assert call["graph_u_node_idx"] in call["dag"][dataset.kwargs["graph_u_constructed_y_child_node_idx"]]
 
 
 class _DeterministicNodeFunction:

@@ -30,6 +30,7 @@ def _graph_u_checkpoint() -> dict:
             {
                 "prior_type": "graph_scm",
                 "graph_u_enabled": True,
+                "graph_u_structure_mode": "add_root",
                 "graph_u_query_location": 2.25,
                 "graph_u_query_scale": 1.5,
                 "graph_u_force_gaussian": False,
@@ -38,6 +39,7 @@ def _graph_u_checkpoint() -> dict:
             vars(
                 PriorConfig(
                     graph_u_enabled=True,
+                    graph_u_structure_mode="add_root",
                     graph_u_query_location=2.25,
                     graph_u_query_scale=1.5,
                     graph_u_force_gaussian=False,
@@ -75,6 +77,8 @@ def test_training_cli_snapshot_preserves_graph_u_shift_parameters():
             "graph_scm",
             "--graph_u_enabled",
             "true",
+            "--graph_u_structure_mode",
+            "add_root",
             "--graph_u_query_location",
             "-2.25",
             "--graph_u_query_scale",
@@ -88,6 +92,7 @@ def test_training_cli_snapshot_preserves_graph_u_shift_parameters():
 
     assert snapshot["prior_type"] == "graph_scm"
     assert snapshot["graph_u_enabled"] is True
+    assert snapshot["graph_u_structure_mode"] == "add_root"
     assert snapshot["graph_u_query_location"] == -2.25
     assert snapshot["graph_u_query_scale"] == 1.5
     assert snapshot["graph_u_force_gaussian"] is False
@@ -145,6 +150,7 @@ def test_get_matched_graph_u_config_returns_exact_training_shift():
     assert matched == {
         "prior_type": "graph_scm",
         "graph_u_enabled": True,
+        "graph_u_structure_mode": "add_root",
         "graph_u_query_location": 2.25,
         "graph_u_query_scale": 1.5,
         "graph_u_force_gaussian": False,
@@ -160,6 +166,15 @@ def test_matched_config_prefers_effective_pre_generated_prior_metadata():
     matched = get_matched_graph_u_config(checkpoint)
 
     assert matched["prior_type"] == "graph_scm"
+
+
+def test_matched_config_maps_pre_structure_mode_checkpoint_to_reject():
+    checkpoint = _graph_u_checkpoint()
+    del checkpoint["prior_config"]["graph_u_structure_mode"]
+
+    matched = get_matched_graph_u_config(checkpoint)
+
+    assert matched["graph_u_structure_mode"] == "reject"
 
 
 def test_load_matched_graph_u_config_reads_checkpoint_path(tmp_path):
@@ -181,6 +196,7 @@ def test_matched_graph_u_config_rejects_legacy_checkpoint_without_metadata():
     [
         ({"prior_type": "mlp_scm"}, {}, "prior_type='graph_scm'"),
         ({}, {"graph_u_enabled": False}, "not trained with Graph-U"),
+        ({}, {"graph_u_structure_mode": "unknown"}, "must be 'reject' or 'add_root'"),
         ({}, {"graph_u_query_scale": 0.0}, "finite and positive"),
     ],
 )
@@ -201,3 +217,19 @@ def test_matched_graph_u_config_rejects_missing_field():
 
     with pytest.raises(ValueError, match="graph_u_query_location"):
         get_matched_graph_u_config(checkpoint)
+
+
+def test_graph_u_structure_mode_validation_uses_base_dag_size():
+    add_root = PriorConfig(
+        graph_u_enabled=True,
+        graph_u_structure_mode="add_root",
+        max_n_nodes=2,
+    )
+
+    assert add_root.graph_u_structure_mode == "add_root"
+    with pytest.raises(ValueError, match="'reject'.*max_n_nodes >= 3"):
+        PriorConfig(
+            graph_u_enabled=True,
+            graph_u_structure_mode="reject",
+            max_n_nodes=2,
+        )

@@ -77,11 +77,33 @@ which can be passed to `RandomDataset`.
 
 ## Graph-U confounder source shift (fork extension)
 
-`graph_u_enabled=True` conditions the graph prior on the existence of an
-unobserved root that is a direct parent of both an observed-X node and a
-distinct target node. Only this selected root receives an environment-specific
-source distribution; its effects then propagate through the ordinary graph
-evaluation.
+`graph_u_enabled=True` creates a task with an unobserved root that is a direct
+parent of both an observed-X node and a distinct target node. Only this root
+receives an environment-specific source distribution; its effects then
+enter the ordinary structural equations and can propagate through descendants.
+As in upstream TabICL, some sampled mechanisms (for example, a tree that never
+splits on U's coordinates) can numerically suppress a nominal parent. The
+construction guarantees the causal graph structure, not a visibly changed X
+and y in every finite sampled task; enforcing the latter would require a
+separate effect-size filter or a guaranteed U term in the child mechanisms.
+
+`graph_u_structure_mode` controls how the required structure is obtained:
+
+- `"add_root"` first samples the ordinary base DAG and feature assignment, then
+  inserts a new hidden root U and adds the two required parent edges. The base
+  node-count setting is unchanged (normally 2--32), so the augmented graph has
+  3--33 nodes. If all X and Y features initially occupy the same base node, one
+  randomly selected X feature is moved to another base node so the two observed
+  children are distinct. Otherwise the sampled feature placement is unchanged.
+  There is no rejection search for a naturally occurring U.
+- `"reject"` retains the earlier implementation: repeatedly sample graphs and
+  feature assignments until an existing hidden root satisfies the condition.
+  `graph_u_max_attempts` is the safety limit for this mode.
+
+For training, `"add_root"` avoids pathological rejection times while leaving
+the ordinary base graph unconditioned. It still deliberately changes the task
+by adding one latent node and its required edges. A shift-specific comparison
+must therefore use the same structure mode on both sides.
 
 By default, the selected confounder retains the graph prior's usual randomly
 selected base-source family. The implementation samples the support and query
@@ -104,6 +126,7 @@ from tabicl.prior.graph_lib._config import PriorConfig
 
 config = PriorConfig(
     graph_u_enabled=True,
+    graph_u_structure_mode="add_root",
     graph_u_query_location=1.0,
     graph_u_query_scale=1.5,
 )
@@ -119,24 +142,31 @@ prior = PriorDataset(
 X, y, active_features, seq_lens, train_sizes = next(prior)
 ```
 
-Use the following three conditions to separate graph-conditioning effects from
-the source shift:
+Use the following conditions to separate structural augmentation from the
+source shift:
 
 - original prior: `graph_u_enabled=False`;
-- Graph-U identity control: enabled with location `0` and scale `1`;
-- Graph-U shift: enabled with a nonzero location and/or nonunit scale.
+- constructed Graph-U identity control: `graph_u_structure_mode="add_root"`,
+  location `0`, and scale `1`;
+- constructed Graph-U shift: the same `"add_root"` mode with a nonzero location
+  and/or nonunit scale.
+
+The older `"reject"` mode is useful as a separate structural ablation, not as a
+matched identity control for an `"add_root"` model.
 
 Run the generation-only diagnostic (no model training) with:
 
 ```bash
-python scripts/smoke_graph_u.py --datasets 20
+python scripts/smoke_graph_u.py --structure-mode add_root --datasets 20
 ```
 
 The diagnostic defaults to a visible shift (location `2`, scale `1.5`). Add
 `--query-location 0 --query-scale 1` for the identity control. It reports
-rejected graph proposals and temporarily captures the selected hidden root in
-memory to verify the source transformation. These latent values are not added
-to the generated dataset or saved by the normal prior API.
+that construction needed no missing-U rejection and temporarily captures the
+selected hidden root in memory to verify the source transformation. With
+`--structure-mode reject`, it instead reports rejected graph proposals and the
+attempt distribution. These latent values are not added to the generated
+dataset or saved by the normal prior API.
 
 `ensure_iid=True` is intentionally rejected with Graph-U in this version,
 because TabICL's extra evaluation pass currently resamples root-level
@@ -150,9 +180,11 @@ changes query U and propagates through its descendants. Classification
 evaluation can still select different SCMs after a condition-specific class
 split rejection, so such condition streams are not guaranteed paired SCMs.
 
-Per-task structural metadata, including the selected U and its observed
-children, is available as `GraphSCM.metadata_` after direct generation. The
-standard `PriorDataset` batch interface still returns tensors only. Saved-prior
-metadata records the global Graph-U settings, but not a per-task graph ledger.
+Per-task structural metadata, including `graph_u_structure_mode`, the selected
+U, and its observed children, is available as `GraphSCM.metadata_` after direct
+generation. In `"add_root"` mode, U is node 0 and
+`graph_u_attempts == 1`. The standard `PriorDataset` batch interface still
+returns tensors only. Saved-prior metadata records the global Graph-U settings,
+but not a per-task graph ledger.
 
 

@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 
-# One-GPU TabICLv2 classifier Stage 1 with the shifted Graph-U prior.
+# One-GPU TabICLv2 classifier Stage 1 with the constructed, shifted Graph-U prior.
 #
 # Safe default: RUN_MODE=pilot trains for 100 steps in a pilot-only checkpoint
 # directory. For the full recipe, submit with RUN_MODE=full. Full jobs use the
@@ -27,9 +27,18 @@ GRAPH_U_QUERY_LOCATION_WAS_SET="${GRAPH_U_QUERY_LOCATION+x}"
 GRAPH_U_QUERY_SCALE_WAS_SET="${GRAPH_U_QUERY_SCALE+x}"
 GRAPH_U_QUERY_LOCATION="${GRAPH_U_QUERY_LOCATION:-2.0}"
 GRAPH_U_QUERY_SCALE="${GRAPH_U_QUERY_SCALE:-1.5}"
+GRAPH_U_STRUCTURE_MODE="${GRAPH_U_STRUCTURE_MODE:-add_root}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-4}"
 N_JOBS="${N_JOBS:-${SLURM_CPUS_PER_TASK}}"
+
+case "${GRAPH_U_STRUCTURE_MODE}" in
+    add_root|reject) ;;
+    *)
+        echo "GRAPH_U_STRUCTURE_MODE must be 'add_root' or 'reject', got: ${GRAPH_U_STRUCTURE_MODE}" >&2
+        exit 1
+        ;;
+esac
 
 case "${RUN_MODE}" in
     pilot)
@@ -63,7 +72,7 @@ fi
 SHIFT_TAG="loc_${GRAPH_U_QUERY_LOCATION}_scale_${GRAPH_U_QUERY_SCALE}"
 SHIFT_TAG="${SHIFT_TAG//-/m}"
 SHIFT_TAG="${SHIFT_TAG//./p}"
-RUN_TAG="${RUN_MODE}_${MAX_STEPS}steps"
+RUN_TAG="${GRAPH_U_STRUCTURE_MODE}_${RUN_MODE}_${MAX_STEPS}steps"
 CKPT_DIR="${CHECKPOINT_DIR:-${CHECKPOINT_ROOT}/graph_u_clf_stage1/${SHIFT_TAG}/${RUN_TAG}}"
 
 # shellcheck disable=SC1091
@@ -94,6 +103,7 @@ PY
 
 echo "Run mode: ${RUN_MODE}"
 echo "Maximum steps: ${MAX_STEPS}"
+echo "Graph-U structure mode: ${GRAPH_U_STRUCTURE_MODE}"
 echo "Graph-U query location: ${GRAPH_U_QUERY_LOCATION}"
 echo "Graph-U query scale: ${GRAPH_U_QUERY_SCALE}"
 echo "Graph-U source family: random (not forced Gaussian)"
@@ -138,10 +148,11 @@ python -u -m tabicl.train \
     --filter_unpredictable_graphs True \
     --filter_unpredictable_datasets True \
     --allow_act_warping False \
-    --min_n_nodes 3 \
+    --min_n_nodes 2 \
     --max_n_nodes 32 \
     --cauchy_dag_offset 0.0 \
     --graph_u_enabled True \
+    --graph_u_structure_mode "${GRAPH_U_STRUCTURE_MODE}" \
     --graph_u_query_location "${GRAPH_U_QUERY_LOCATION}" \
     --graph_u_query_scale "${GRAPH_U_QUERY_SCALE}" \
     --graph_u_force_gaussian False \

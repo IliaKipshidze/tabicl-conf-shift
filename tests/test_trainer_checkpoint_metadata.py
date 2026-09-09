@@ -24,6 +24,7 @@ def test_trainer_checkpoint_keeps_model_config_and_adds_training_provenance(tmp_
     trainer.training_config = {
         "prior_type": "graph_scm",
         "graph_u_enabled": True,
+        "graph_u_structure_mode": "add_root",
         "graph_u_query_location": 2.0,
         "graph_u_query_scale": 1.5,
         "graph_u_force_gaussian": False,
@@ -31,6 +32,7 @@ def test_trainer_checkpoint_keeps_model_config_and_adds_training_provenance(tmp_
     trainer.prior_config = {
         "prior_type": "graph_scm",
         "graph_u_enabled": True,
+        "graph_u_structure_mode": "add_root",
         "graph_u_query_location": 2.0,
         "graph_u_query_scale": 1.5,
         "graph_u_force_gaussian": False,

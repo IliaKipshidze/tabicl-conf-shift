@@ -49,6 +49,7 @@ def _descriptor(
     prior_config = vars(
         PriorConfig(
             graph_u_enabled=graph_u,
+            graph_u_structure_mode="add_root",
             graph_u_query_location=2.5,
             graph_u_query_scale=1.75,
             graph_u_force_gaussian=False,
@@ -176,6 +177,7 @@ def test_condition_resolution_uses_one_reference_for_all_models(tmp_path):
         "strong",
     ]
     assert conditions[0].graph_u_enabled is False
+    assert all(condition.structure_mode == "add_root" for condition in conditions)
     assert (conditions[1].query_location, conditions[1].query_scale) == (0.0, 1.0)
     assert (conditions[2].query_location, conditions[2].query_scale) == (2.5, 1.75)
     assert (conditions[3].query_location, conditions[3].query_scale) == (5.0, 2.0)
@@ -183,6 +185,7 @@ def test_condition_resolution_uses_one_reference_for_all_models(tmp_path):
 
     config = build_prior_config(reference, conditions[2])
     assert config.graph_u_enabled is True
+    assert config.graph_u_structure_mode == "add_root"
     assert config.graph_u_query_location == 2.5
     assert config.graph_u_query_scale == 1.75
     assert config.graph_u_max_attempts == 123
@@ -214,6 +217,27 @@ def test_default_conditions_only_include_matched_when_recorded(tmp_path):
     legacy_details = prior_reconstruction_details(legacy_reference)
     assert legacy_details["complete"] is False
     assert legacy_details["missing_fields_using_evaluator_defaults"]
+
+
+def test_legacy_graph_u_prior_reconstructs_historical_reject_mode(tmp_path):
+    reference = _descriptor(tmp_path)
+    assert reference.prior_config is not None
+    old_prior_config = dict(reference.prior_config)
+    del old_prior_config["graph_u_structure_mode"]
+    reference = dataclasses.replace(reference, prior_config=old_prior_config)
+
+    conditions = resolve_conditions(
+        [parse_condition("identity"), parse_condition("matched")], reference
+    )
+
+    assert [condition.structure_mode for condition in conditions] == [
+        "reject",
+        "reject",
+    ]
+    assert (
+        build_prior_config(reference, conditions[1]).graph_u_structure_mode == "reject"
+    )
+    assert prior_reconstruction_details(reference)["complete"] is True
 
 
 def test_duplicate_checkpoint_stems_get_unambiguous_labels(tmp_path):

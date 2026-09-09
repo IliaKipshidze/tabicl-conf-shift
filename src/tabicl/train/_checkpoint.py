@@ -24,6 +24,9 @@ _GRAPH_U_KEYS = (
     "graph_u_force_gaussian",
     "graph_u_max_attempts",
 )
+# The structure-mode field is intentionally not required: checkpoints created
+# before it existed always used rejection sampling, so they can be reconstructed.
+_LEGACY_GRAPH_U_STRUCTURE_MODE = "reject"
 
 
 def normalize_config(value: Any) -> Any:
@@ -173,6 +176,11 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 
     validated = PriorConfig(
         graph_u_enabled=True,
+        # Every Graph-U checkpoint written before structure modes were introduced
+        # used rejection sampling. Its missing field is therefore unambiguous.
+        graph_u_structure_mode=prior_config.get(
+            "graph_u_structure_mode", _LEGACY_GRAPH_U_STRUCTURE_MODE
+        ),
         graph_u_query_location=prior_config["graph_u_query_location"],
         graph_u_query_scale=prior_config["graph_u_query_scale"],
         graph_u_force_gaussian=prior_config["graph_u_force_gaussian"],
@@ -181,6 +189,7 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "prior_type": prior_type,
         "graph_u_enabled": validated.graph_u_enabled,
+        "graph_u_structure_mode": validated.graph_u_structure_mode,
         "graph_u_query_location": validated.graph_u_query_location,
         "graph_u_query_scale": validated.graph_u_query_scale,
         "graph_u_force_gaussian": validated.graph_u_force_gaussian,

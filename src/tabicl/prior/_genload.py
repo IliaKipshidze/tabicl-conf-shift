@@ -537,6 +537,9 @@ class SavePriorDataset:
             "replay_small": self.args.replay_small,
             "graph_noise": self.args.graph_noise,
             "graph_u_enabled": getattr(self.args, "graph_u_enabled", False),
+            "graph_u_structure_mode": getattr(
+                self.args, "graph_u_structure_mode", "reject"
+            ),
             "graph_u_query_location": getattr(self.args, "graph_u_query_location", 0.0),
             "graph_u_query_scale": getattr(self.args, "graph_u_query_scale", 1.0),
             "graph_u_force_gaussian": getattr(self.args, "graph_u_force_gaussian", False),

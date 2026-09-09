@@ -42,12 +42,20 @@ class PriorConfig:
     trivial_dataset_threshold: float = 0.05
     use_corrected_cat_meta_sampling: bool = False
     graph_u_enabled: bool = False
+    graph_u_structure_mode: Literal["reject", "add_root"] = "reject"
     graph_u_query_location: float = 0.0
     graph_u_query_scale: float = 1.0
     graph_u_force_gaussian: bool = False
     graph_u_max_attempts: int = 1000
 
     def __post_init__(self) -> None:
+        if not isinstance(self.graph_u_structure_mode, str) or (
+            self.graph_u_structure_mode not in {"reject", "add_root"}
+        ):
+            raise ValueError(
+                "graph_u_structure_mode must be 'reject' or 'add_root', got "
+                f"{self.graph_u_structure_mode!r}"
+            )
         if not math.isfinite(self.graph_u_query_location):
             raise ValueError("graph_u_query_location must be finite")
         if not math.isfinite(self.graph_u_query_scale) or self.graph_u_query_scale <= 0:
@@ -59,8 +67,13 @@ class PriorConfig:
         if self.graph_u_max_attempts <= 0:
             raise ValueError("graph_u_max_attempts must be positive")
         self.graph_u_max_attempts = int(self.graph_u_max_attempts)
-        if self.graph_u_enabled and self.max_n_nodes < 3:
-            raise ValueError("Graph-U requires max_n_nodes >= 3")
+        if self.graph_u_enabled:
+            minimum_nodes = 2 if self.graph_u_structure_mode == "add_root" else 3
+            if self.max_n_nodes < minimum_nodes:
+                raise ValueError(
+                    f"Graph-U structure mode {self.graph_u_structure_mode!r} requires "
+                    f"max_n_nodes >= {minimum_nodes}"
+                )
         if self.graph_u_enabled and self.ensure_iid:
             raise ValueError(
                 "Graph-U does not currently support ensure_iid=True because the "
@@ -96,6 +109,7 @@ class PriorConfig:
                            trivial_dataset_threshold=args.trivial_dataset_threshold,
                            use_corrected_cat_meta_sampling=args.use_corrected_cat_meta_sampling,
                            graph_u_enabled=getattr(args, "graph_u_enabled", False),
+                           graph_u_structure_mode=getattr(args, "graph_u_structure_mode", "reject"),
                            graph_u_query_location=getattr(args, "graph_u_query_location", 0.0),
                            graph_u_query_scale=getattr(args, "graph_u_query_scale", 1.0),
                            graph_u_force_gaussian=getattr(args, "graph_u_force_gaussian", False),
@@ -267,6 +281,15 @@ class PriorConfig:
             default=False,
             type=str2bool,
             help="Whether to require and shift one hidden root confounder in graph_scm tasks.",
+        )
+        parser.add_argument(
+            "--graph_u_structure_mode",
+            default="reject",
+            choices=("reject", "add_root"),
+            help=(
+                "How to obtain the hidden confounder: reject ordinary DAGs without "
+                "one, or add a new hidden root to every ordinary DAG."
+            ),
         )
         parser.add_argument(
             "--graph_u_query_location",

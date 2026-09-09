@@ -54,6 +54,7 @@ class EvaluationCondition:
 
     name: str
     graph_u_enabled: bool
+    structure_mode: Literal["reject", "add_root"]
     query_location: float
     query_scale: float
     force_gaussian: bool
@@ -63,6 +64,7 @@ class EvaluationCondition:
         return {
             "name": self.name,
             "graph_u_enabled": self.graph_u_enabled,
+            "graph_u_structure_mode": self.structure_mode,
             "graph_u_query_location": self.query_location,
             "graph_u_query_scale": self.query_scale,
             "graph_u_force_gaussian": self.force_gaussian,
@@ -303,6 +305,14 @@ def resolve_conditions(
 
     prior_config = reference.prior_config or {}
     matched_config = _matched_config_or_none(reference)
+    # Checkpoints predating explicit structure modes necessarily used rejection.
+    base_structure_mode = prior_config.get("graph_u_structure_mode", "reject")
+    if not isinstance(base_structure_mode, str) or (
+        base_structure_mode not in {"reject", "add_root"}
+    ):
+        raise ValueError(
+            "Reference graph_u_structure_mode must be 'reject' or 'add_root'"
+        )
     force_gaussian_recorded = "graph_u_force_gaussian" in prior_config
     base_force_gaussian = prior_config.get("graph_u_force_gaussian", False)
     if not isinstance(base_force_gaussian, bool):
@@ -319,6 +329,7 @@ def resolve_conditions(
             condition = EvaluationCondition(
                 name=spec.name,
                 graph_u_enabled=False,
+                structure_mode=base_structure_mode,
                 query_location=0.0,
                 query_scale=1.0,
                 force_gaussian=base_force_gaussian,
@@ -333,6 +344,7 @@ def resolve_conditions(
             condition = EvaluationCondition(
                 name=spec.name,
                 graph_u_enabled=True,
+                structure_mode=base_structure_mode,
                 query_location=0.0,
                 query_scale=1.0,
                 force_gaussian=base_force_gaussian,
@@ -348,6 +360,7 @@ def resolve_conditions(
             condition = EvaluationCondition(
                 name=spec.name,
                 graph_u_enabled=True,
+                structure_mode=str(matched_config["graph_u_structure_mode"]),
                 query_location=float(matched_config["graph_u_query_location"]),
                 query_scale=float(matched_config["graph_u_query_scale"]),
                 force_gaussian=bool(matched_config["graph_u_force_gaussian"]),
@@ -358,6 +371,7 @@ def resolve_conditions(
             condition = EvaluationCondition(
                 name=spec.name,
                 graph_u_enabled=True,
+                structure_mode=base_structure_mode,
                 query_location=spec.query_location,
                 query_scale=spec.query_scale,
                 force_gaussian=(
@@ -379,6 +393,8 @@ def prior_reconstruction_details(
     stored = dict(reference.prior_config or {})
     if "graph_noise" in stored and "add_gaussian_noise" not in stored:
         stored["add_gaussian_noise"] = stored["graph_noise"]
+    # Absence denotes the sole historical implementation, rejection sampling.
+    stored.setdefault("graph_u_structure_mode", "reject")
     missing = sorted(_PRIOR_CONFIG_FIELDS - stored.keys())
     return {
         "source": (
@@ -446,6 +462,7 @@ def build_prior_config(
     }
     kwargs.update(
         graph_u_enabled=condition.graph_u_enabled,
+        graph_u_structure_mode=condition.structure_mode,
         graph_u_query_location=condition.query_location,
         graph_u_query_scale=condition.query_scale,
         graph_u_force_gaussian=condition.force_gaussian,

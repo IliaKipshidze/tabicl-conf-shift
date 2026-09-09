@@ -1,4 +1,4 @@
-# Training the Graph-U classifier at CISPA
+# Training the constructed Graph-U classifier at CISPA
 
 These commands target the account layout recorded for `c01ilki`:
 
@@ -8,8 +8,9 @@ These commands target the account layout recorded for `c01ilki`:
 - checkpoints: `/home/bin/CISPA-scratch/c01ilki/tabicl-conf-shift-checkpoints`
 - Slurm partition: `gpu`, one GPU and eight CPUs
 
-All paths can be overridden through the environment variables documented in
-the scripts, but no overrides are needed for this layout.
+Runtime repository, environment, and checkpoint paths can be overridden through
+the variables documented in the scripts; the Slurm log directives intentionally
+remain fixed to this `c01ilki` layout.
 
 ## 1. Clone the Linux copy
 
@@ -48,7 +49,12 @@ visible GPU.
 ## 3. Submit the generator/GPU smoke test
 
 The defaults reproduce the diagnostic shift used during development:
-location `2.0`, scale `1.5`, with a random source family.
+location `2.0`, scale `1.5`, 94 observed features, and a random source family.
+The 94-feature default directly covers the case that defeated rejection
+sampling. The default structure mode is `add_root`: TabICL first samples its
+ordinary base graph and then inserts a hidden root U with direct edges to
+distinct observed-X and target nodes. It does not wait for a suitable
+confounder to occur by chance.
 
 ```bash
 sbatch scripts/slurm_graph_u_smoke.sh
@@ -57,9 +63,15 @@ sbatch scripts/slurm_graph_u_smoke.sh
 To inspect another condition:
 
 ```bash
-sbatch --export=ALL,GRAPH_U_QUERY_LOCATION=1.0,GRAPH_U_QUERY_SCALE=1.5 \
+sbatch --export=ALL,GRAPH_U_STRUCTURE_MODE=add_root,GRAPH_U_FEATURES=94,GRAPH_U_QUERY_LOCATION=1.0,GRAPH_U_QUERY_SCALE=1.5 \
   scripts/slurm_graph_u_smoke.sh
 ```
+
+The diagnostic prints `base graphs rejected for a missing U: 0` in
+`add_root` mode and verifies that every dataset records the inserted U as a
+hidden root. The older rejection-conditioned implementation remains available
+for comparison with `GRAPH_U_STRUCTURE_MODE=reject`; only that mode can report
+multiple structural attempts.
 
 The output and error filenames include the Slurm job ID and are written under
 `/home/bin/CISPA-scratch/c01ilki`.
@@ -72,16 +84,18 @@ The training script deliberately defaults to a 100-step pilot:
 sbatch scripts/slurm_train_graph_u_clf_stage1.sh
 ```
 
-This is a real training run, but its checkpoint directory is separate from the
-full run. Check its runtime, GPU memory, loss, generator throughput, and saved
-checkpoints before starting the long run.
+This is a real `add_root` training run, but its checkpoint directory is separate
+from the full run. Check its runtime, GPU memory, loss, generator throughput,
+and saved checkpoints before starting the long run. Both checkpoint paths and
+run names contain the structure mode, preventing `add_root` and `reject` jobs
+from resuming each other's checkpoints.
 
 ## 5. Submit the full Stage-1 run
 
 After choosing the experimental shift parameters, specify them explicitly:
 
 ```bash
-sbatch --export=ALL,RUN_MODE=full,GRAPH_U_QUERY_LOCATION=2.0,GRAPH_U_QUERY_SCALE=1.5 \
+sbatch --export=ALL,RUN_MODE=full,GRAPH_U_STRUCTURE_MODE=add_root,GRAPH_U_QUERY_LOCATION=2.0,GRAPH_U_QUERY_SCALE=1.5 \
   scripts/slurm_train_graph_u_clf_stage1.sh
 ```
 
@@ -94,10 +108,12 @@ Stage 1 follows the upstream 500,000-step TabICLv2 classifier recipe. A single
 the same parameter-specific checkpoint directory; TabICL finds the latest
 checkpoint there and restores the model, optimizer, scheduler, and step.
 
-Do not change `MAX_STEPS`, location, scale, or the checkpoint directory between
-resubmissions of the same experiment. A pilot checkpoint should not seed the
-full run because its learning-rate schedule was created for a different number
-of steps.
+Do not change `MAX_STEPS`, structure mode, location, scale, or the checkpoint
+directory between resubmissions of the same experiment. A pilot checkpoint
+should not seed the full run because its learning-rate schedule was created for
+a different number of steps. More generally, do not change other training
+settings while reusing a checkpoint directory, and do not run two jobs against
+the same directory concurrently; not every override is encoded in its name.
 
 Useful monitoring commands:
 

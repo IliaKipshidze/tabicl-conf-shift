@@ -198,6 +198,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--features", type=int, default=5)
     parser.add_argument("--query-location", type=float, default=2.0)
     parser.add_argument("--query-scale", type=float, default=1.5)
+    parser.add_argument(
+        "--structure-mode",
+        choices=("reject", "add_root"),
+        default="add_root",
+        help="Find U by rejection or construct it as a new hidden root.",
+    )
     parser.add_argument("--force-gaussian", action="store_true")
     parser.add_argument("--seed", type=int, default=20260903)
     return parser.parse_args()
@@ -214,6 +220,7 @@ def main() -> None:
 
     config = PriorConfig(
         graph_u_enabled=True,
+        graph_u_structure_mode=args.structure_mode,
         graph_u_query_location=args.query_location,
         graph_u_query_scale=args.query_scale,
         graph_u_force_gaussian=args.force_gaussian,
@@ -260,6 +267,17 @@ def main() -> None:
             selected_u = metadata["graph_u_node_idx"]
             if selected_u is None or metadata["graph_u_enabled"] is not True:
                 raise RuntimeError("Generated dataset is missing Graph-U metadata")
+            if metadata["graph_u_structure_mode"] != args.structure_mode:
+                raise RuntimeError(
+                    "Generated dataset has the wrong Graph-U structure mode: "
+                    f"{metadata['graph_u_structure_mode']!r}"
+                )
+            x_children = tuple(metadata["graph_u_x_child_node_idxs"])
+            y_children = tuple(metadata["graph_u_y_child_node_idxs"])
+            if not any(x_child != y_child for x_child in x_children for y_child in y_children):
+                raise RuntimeError(
+                    "Selected U is not a direct parent of distinct observed X and Y nodes"
+                )
             expected_x_shape = (args.support + args.query, args.features)
             if X.shape != expected_x_shape or y.shape != (args.support + args.query,):
                 raise RuntimeError(
@@ -270,6 +288,13 @@ def main() -> None:
 
             attempts.append(metadata["graph_u_attempts"])
             candidate_counts.append(len(metadata["graph_u_candidate_node_idxs"]))
+            if args.structure_mode == "add_root":
+                if metadata["graph_u_attempts"] != 1:
+                    raise RuntimeError("Constructed Graph-U must use exactly one structural attempt")
+                if selected_u != 0 or tuple(metadata["graph_u_candidate_node_idxs"]) != (0,):
+                    raise RuntimeError(
+                        "Constructed Graph-U must record the inserted root as node 0"
+                    )
             source_errors.append(support_error)
             query_errors.append(query_error)
             source_shift_scores.append(
@@ -289,18 +314,27 @@ def main() -> None:
     print(f"datasets accepted: {args.datasets}")
     print(f"rows per dataset: {args.support} support + {args.query} query")
     print(f"observed columns: {args.features} X + 1 y; hidden U columns exposed: 0")
+    print(f"structure mode: {args.structure_mode}")
     print(f"force Gaussian: {args.force_gaussian}")
     print(f"source families: {dict(source_families)}")
-    print(f"graph proposals: {total_proposals}")
-    print(f"graphs rejected before generation: {total_rejections}")
-    print(f"accepted on first proposal: {attempts.count(1)}/{args.datasets}")
-    print(
-        "attempts per accepted dataset: "
-        f"mean={attempts_array.mean():.2f}, median={np.median(attempts_array):.1f}, "
-        f"max={attempts_array.max()}"
-    )
-    print(f"attempt histogram (attempts: datasets): {_format_histogram(attempts)}")
-    print(f"candidate-count histogram: {_format_histogram(candidate_counts)}")
+    if args.structure_mode == "reject":
+        print(f"graph proposals: {total_proposals}")
+        print(f"graphs rejected before generation: {total_rejections}")
+        print(f"accepted on first proposal: {attempts.count(1)}/{args.datasets}")
+        print(
+            "attempts per accepted dataset: "
+            f"mean={attempts_array.mean():.2f}, median={np.median(attempts_array):.1f}, "
+            f"max={attempts_array.max()}"
+        )
+        print(f"attempt histogram (attempts: datasets): {_format_histogram(attempts)}")
+        print(f"candidate-count histogram: {_format_histogram(candidate_counts)}")
+    else:
+        print("base graphs rejected for a missing U: 0 (U was constructed)")
+        print(f"constructed in one structural pass: {attempts.count(1)}/{args.datasets}")
+        print(
+            "constructed-U metadata count histogram: "
+            f"{_format_histogram(candidate_counts)}"
+        )
     print(f"max support source identity error: {max(source_errors):.3g}")
     print(f"max query affine-formula error: {max(query_errors):.3g}")
     print(

@@ -15,8 +15,18 @@ CONDA_ROOT="${CONDA_ROOT:-${CLUSTER_ROOT}/miniconda3}"
 ENV_PATH="${ENV_PATH:-${CONDA_ROOT}/envs/tabicl-conf-shift}"
 
 GRAPH_U_DATASETS="${GRAPH_U_DATASETS:-20}"
+GRAPH_U_FEATURES="${GRAPH_U_FEATURES:-94}"
 GRAPH_U_QUERY_LOCATION="${GRAPH_U_QUERY_LOCATION:-2.0}"
 GRAPH_U_QUERY_SCALE="${GRAPH_U_QUERY_SCALE:-1.5}"
+GRAPH_U_STRUCTURE_MODE="${GRAPH_U_STRUCTURE_MODE:-add_root}"
+
+case "${GRAPH_U_STRUCTURE_MODE}" in
+    add_root|reject) ;;
+    *)
+        echo "GRAPH_U_STRUCTURE_MODE must be 'add_root' or 'reject', got: ${GRAPH_U_STRUCTURE_MODE}" >&2
+        exit 1
+        ;;
+esac
 
 # shellcheck disable=SC1091
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
@@ -47,5 +57,7 @@ PY
 # generated. It does not add U to X/y or expose it to the model.
 python -u scripts/smoke_graph_u.py \
     --datasets "${GRAPH_U_DATASETS}" \
+    --features "${GRAPH_U_FEATURES}" \
+    --structure-mode "${GRAPH_U_STRUCTURE_MODE}" \
     --query-location "${GRAPH_U_QUERY_LOCATION}" \
     --query-scale "${GRAPH_U_QUERY_SCALE}"
