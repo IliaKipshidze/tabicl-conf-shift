@@ -38,8 +38,12 @@ bash scripts/setup_cispa_env.sh
 ```
 
 `environment.cispa.yml` selects Python 3.11 and the setup script installs this
-repository with its `pretrain` and `test` extras. CUDA is validated inside the
-Slurm GPU job because a login node may legitimately report no visible GPU.
+repository with its `pretrain` and `test` extras. It first pins the official
+PyTorch 2.5.1 CUDA 12.1 wheel, which is compatible with the CUDA 12.x driver on
+the current CISPA A100 nodes. This also prevents the unbounded `torch>=2.2`
+dependency from selecting an incompatible CUDA 13 wheel. CUDA is validated
+inside the Slurm GPU job because a login node may legitimately report no
+visible GPU.
 
 ## 3. Submit the generator/GPU smoke test
 

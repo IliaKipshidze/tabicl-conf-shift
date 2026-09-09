@@ -38,6 +38,14 @@ conda activate "${ENV_PATH}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${CLUSTER_ROOT}/pip-cache}"
 mkdir -p "${PIP_CACHE_DIR}"
 python -m pip install --upgrade pip
+
+# CISPA's A100 nodes currently expose NVIDIA driver 535 (CUDA 12.x). Installing
+# the unbounded ``torch>=2.2`` project dependency directly can select a CUDA 13
+# wheel, which requires driver 580 or newer. Pin the official CUDA 12.1 build
+# first; it satisfies TabICL's requirement and prevents the subsequent editable
+# install from replacing it.
+python -m pip install "torch==2.5.1" \
+    --index-url https://download.pytorch.org/whl/cu121
 python -m pip install -e ".[pretrain,test]"
 
 python - <<'PY'
