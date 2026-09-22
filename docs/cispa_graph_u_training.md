@@ -1,5 +1,9 @@
 # Training the constructed Graph-U classifier at CISPA
 
+For the separate paper-scale Nano-Graph-U preliminary experiment, see
+[nano_graph_u_training.md](nano_graph_u_training.md). The full TabICL commands
+below remain unchanged.
+
 These commands target the account layout recorded for `c01ilki`:
 
 - repository: `/home/bin/CISPA-scratch/c01ilki/tabicl-conf-shift`

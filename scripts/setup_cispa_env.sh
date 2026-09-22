@@ -33,8 +33,9 @@ fi
 
 conda activate "${ENV_PATH}"
 
-# The pretrain extra supplies transformers, xgboost, and wandb. The test extra
-# is small and lets us run focused checks on the cluster before a long job.
+# The pretrain extra supplies transformers, xgboost, and wandb. The nano extra
+# adds only h5py and schedulefree for the separate paper-scale experiment.
+# The test extra lets us run focused checks before a long job.
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${CLUSTER_ROOT}/pip-cache}"
 mkdir -p "${PIP_CACHE_DIR}"
 python -m pip install --upgrade pip
@@ -46,7 +47,7 @@ python -m pip install --upgrade pip
 # install from replacing it.
 python -m pip install "torch==2.5.1" \
     --index-url https://download.pytorch.org/whl/cu121
-python -m pip install -e ".[pretrain,test]"
+python -m pip install -e ".[pretrain,nano,test]"
 
 python - <<'PY'
 import sys

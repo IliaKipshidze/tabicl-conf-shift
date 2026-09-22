@@ -66,6 +66,10 @@ pretrain = [
     "xgboost",  # used in the TabICLv1 prior
     "wandb",  # logging in pre-training
 ]
+nano = [
+    "h5py>=3,<4",  # paper-style pre-generated prior dumps
+    "schedulefree>=1.4,<2",  # paper's AdamW schedule-free optimizer
+]
 finetune = [
     "transformers",  # get_scheduler reuses the pretraining cosine-warmup schedules
     "wandb",  # optional, only engaged when wandb_kwargs is passed
@@ -75,7 +79,7 @@ test = [
     "pytest",
 ]
 all = [
-    "tabicl[doc,forecast,shap,pretrain,finetune,test]",
+    "tabicl[doc,forecast,shap,pretrain,finetune,nano,test]",
 ]
 
 [build-system]
