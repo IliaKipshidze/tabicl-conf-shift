@@ -133,3 +133,7 @@ the provided commands do not claim to do so. The primary comparison is
 shift-trained versus identity-trained Nano on the same shifted evaluation
 bank, together with their performance on the identity bank. It does not by
 itself establish the effect for the full-size TabICL model.
+
+If all evaluation metrics remain near chance, run the isolated checks in
+[Nano-Graph-U diagnostics](nano_graph_u_diagnostics.md) before spending
+resources on a second full training run.
