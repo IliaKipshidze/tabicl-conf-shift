@@ -10,8 +10,9 @@
 # Read-only diagnostics for the completed shifted Nano-Graph-U experiment.
 # This job does not edit the training/evaluation dumps or saved checkpoints.
 # It scores several checkpoints on the same frozen eval banks, compares an
-# ExtraTrees support-to-query baseline, and overfits one training table using
-# a fresh model. Each report is written once under a job-specific directory.
+# ExtraTrees support-to-query baseline, and repeatedly fits one complete
+# training batch using a fresh model. Each report is written once under a
+# job-specific directory.
 
 set -euo pipefail
 
@@ -26,7 +27,7 @@ NANO_SHIFT_EVAL_DUMP="${SHIFT_EVAL_DUMP:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-
 NANO_IDENTITY_EVAL_DUMP="${IDENTITY_EVAL_DUMP:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/evaluation/loc_0p0_scale_1p0_seed424242_100steps_b32/tasks.h5}"
 NANO_DIAG_MAX_TASKS="${MAX_TASKS:-128}"
 NANO_OVERFIT_STEPS="${OVERFIT_STEPS:-1000}"
-NANO_OVERFIT_TABLE_INDEX="${OVERFIT_TABLE_INDEX:-0}"
+NANO_OVERFIT_BATCH_STEP="${OVERFIT_BATCH_STEP:-0}"
 NANO_DIAG_OUTPUT_DIR="${OUTPUT_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/diagnostics/job-${SLURM_JOB_ID}}"
 
 for NANO_REQUIRED_FILE in \
@@ -77,6 +78,7 @@ python -u -m tabicl.nano_graph_u.diagnose \
     --dump "${NANO_SHIFT_EVAL_DUMP}" \
     --max-tasks "${NANO_DIAG_MAX_TASKS}" \
     --device cuda \
+    --include-training-weights \
     --output "${NANO_DIAG_OUTPUT_DIR}/shifted_eval.json"
 
 python -u -m tabicl.nano_graph_u.diagnose \
@@ -84,14 +86,15 @@ python -u -m tabicl.nano_graph_u.diagnose \
     --dump "${NANO_IDENTITY_EVAL_DUMP}" \
     --max-tasks "${NANO_DIAG_MAX_TASKS}" \
     --device cuda \
+    --include-training-weights \
     --output "${NANO_DIAG_OUTPUT_DIR}/identity_eval.json"
 
-echo "Overfitting training table ${NANO_OVERFIT_TABLE_INDEX} for ${NANO_OVERFIT_STEPS} updates"
+echo "Fitting fixed training batch ${NANO_OVERFIT_BATCH_STEP} for ${NANO_OVERFIT_STEPS} updates"
 python -u -m tabicl.nano_graph_u.overfit \
     --dump "${NANO_TRAIN_DUMP}" \
-    --table-index "${NANO_OVERFIT_TABLE_INDEX}" \
+    --batch-step "${NANO_OVERFIT_BATCH_STEP}" \
     --steps "${NANO_OVERFIT_STEPS}" \
     --device cuda \
-    --output "${NANO_DIAG_OUTPUT_DIR}/fixed_table_overfit.json"
+    --output "${NANO_DIAG_OUTPUT_DIR}/fixed_batch_overfit.json"
 
 echo "Nano diagnostics completed: ${NANO_DIAG_OUTPUT_DIR}"

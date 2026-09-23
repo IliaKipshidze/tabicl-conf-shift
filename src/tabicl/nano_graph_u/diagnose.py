@@ -22,6 +22,7 @@ from sklearn.metrics import roc_auc_score
 
 from .data import NanoPriorDumpLoader
 from .model import NanoTabPFNModel
+from .train import _schedulefree_adamw
 
 
 def _sha256(path: Path) -> str:
@@ -103,6 +104,89 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, float | int | None]:
     return result
 
 
+def _score_model(
+    model: NanoTabPFNModel,
+    batches: list[tuple[torch.Tensor, torch.Tensor, int, int]],
+    compute_device: torch.device,
+) -> list[dict[str, Any]]:
+    """Score one model-weight view on the already loaded frozen batches."""
+    model.to(compute_device).eval()
+    rows: list[dict[str, Any]] = []
+    with torch.inference_mode():
+        for x_batch, y_batch, split, offset in batches:
+            x = x_batch.to(compute_device)
+            support_y = y_batch[:, :split].to(compute_device).float()
+            logits = model((x, support_y), train_test_split_index=split)
+            if logits.shape != (len(x_batch), len(y_batch[0]) - split, 2):
+                raise ValueError("checkpoint produced an unexpected query shape")
+            probabilities = logits.softmax(dim=-1)[..., 1].cpu().numpy()
+            margins = (logits[..., 1] - logits[..., 0]).cpu().numpy()
+            query_targets = y_batch[:, split:].to(compute_device)
+            log_probs = logits.log_softmax(dim=-1)
+            exact_nll = (
+                -log_probs.gather(-1, query_targets.unsqueeze(-1))
+                .squeeze(-1)
+                .mean(dim=1)
+                .cpu()
+                .numpy()
+            )
+            for index in range(len(x_batch)):
+                y = y_batch[index].numpy()
+                row = _scores(
+                    y[split:],
+                    probabilities[index],
+                    margin=margins[index],
+                    exact_nll=float(exact_nll[index]),
+                )
+                row.update(
+                    task_index=offset + index,
+                    support_rows=split,
+                    support_positive_fraction=float(np.mean(y[:split])),
+                )
+                rows.append(row)
+    return rows
+
+
+def _checkpoint_weight_views(
+    checkpoint: dict[str, Any],
+    compute_device: torch.device,
+    *,
+    include_training_weights: bool,
+    checkpoint_label: str,
+) -> list[tuple[str, NanoTabPFNModel]]:
+    """Load saved averaged weights and optionally reconstruct live weights."""
+    model_config = checkpoint["model_config"]
+    averaged_model = NanoTabPFNModel(**model_config)
+    averaged_model.load_state_dict(checkpoint["model"])
+    views = [("schedulefree_averaged_x", averaged_model)]
+    if not include_training_weights:
+        return views
+
+    train_config = checkpoint.get("train_config", {})
+    if "optimizer" not in checkpoint:
+        raise ValueError(
+            "checkpoint has no optimizer state for training-weight reconstruction: "
+            f"{checkpoint_label}"
+        )
+    if "learning_rate" not in train_config:
+        raise ValueError(
+            "checkpoint has no learning rate for training-weight reconstruction: "
+            f"{checkpoint_label}"
+        )
+    training_model = NanoTabPFNModel(**model_config).to(compute_device).float()
+    training_model.load_state_dict(checkpoint["model"])
+    optimizer = _schedulefree_adamw(
+        training_model.parameters(),
+        learning_rate=float(train_config["learning_rate"]),
+    )
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    if not all(not group.get("train_mode", True) for group in optimizer.param_groups):
+        raise ValueError("checkpoint optimizer was not saved in evaluation mode")
+    optimizer.train()
+    views.append(("schedulefree_training_y", training_model))
+    return views
+
+
 def diagnose_dump(
     checkpoint_paths: list[str | Path],
     dump_path: str | Path,
@@ -112,6 +196,7 @@ def diagnose_dump(
     baseline: bool = True,
     baseline_trees: int = 100,
     baseline_seed: int = 0,
+    include_training_weights: bool = False,
 ) -> dict[str, Any]:
     """Score fixed query rows without fitting on them or updating checkpoints."""
     if not checkpoint_paths:
@@ -146,7 +231,7 @@ def diagnose_dump(
 
     dump_hash = _sha256(dump_path)
     output: dict[str, Any] = {
-        "format": "nano_graph_u_diagnostic_v1",
+        "format": "nano_graph_u_diagnostic_v2",
         "dump": str(dump_path),
         "dump_sha256": dump_hash,
         "dump_metadata": loader.metadata,
@@ -194,57 +279,32 @@ def diagnose_dump(
         model_config = checkpoint["model_config"]
         if int(model_config["num_outputs"]) != 2:
             raise ValueError("diagnostic currently supports binary Nano tasks only")
-        model = NanoTabPFNModel(**model_config)
-        model.load_state_dict(checkpoint["model"])
-        model.to(compute_device).eval()
-        model_rows: list[dict[str, Any]] = []
-        with torch.inference_mode():
-            for x_batch, y_batch, split, offset in batches:
-                x = x_batch.to(compute_device)
-                support_y = y_batch[:, :split].to(compute_device).float()
-                logits = model((x, support_y), train_test_split_index=split)
-                if logits.shape != (len(x_batch), len(y_batch[0]) - split, 2):
-                    raise ValueError("checkpoint produced an unexpected query shape")
-                probabilities = logits.softmax(dim=-1)[..., 1].cpu().numpy()
-                margins = (logits[..., 1] - logits[..., 0]).cpu().numpy()
-                query_targets = y_batch[:, split:].to(compute_device)
-                log_probs = logits.log_softmax(dim=-1)
-                exact_nll = (
-                    -log_probs.gather(-1, query_targets.unsqueeze(-1))
-                    .squeeze(-1)
-                    .mean(dim=1)
-                    .cpu()
-                    .numpy()
-                )
-                for index in range(len(x_batch)):
-                    y = y_batch[index].numpy()
-                    row = _scores(
-                        y[split:],
-                        probabilities[index],
-                        margin=margins[index],
-                        exact_nll=float(exact_nll[index]),
-                    )
-                    row.update(
-                        task_index=offset + index,
-                        support_rows=split,
-                        support_positive_fraction=float(np.mean(y[:split])),
-                    )
-                    model_rows.append(row)
         train_config = checkpoint.get("train_config", {})
-        output["models"].append(
-            {
-                "checkpoint": str(checkpoint_path),
-                "checkpoint_sha256": _sha256(checkpoint_path),
-                "checkpoint_step": int(checkpoint["step"]),
-                "matches_training_dump": train_config.get("dump_sha256") == dump_hash
-                or (
-                    train_config.get("dump_path") is not None
-                    and Path(train_config["dump_path"]).resolve() == dump_path
-                ),
-                "summary": _summary(model_rows),
-                "per_task": model_rows,
-            }
+        matches_training_dump = train_config.get("dump_sha256") == dump_hash or (
+            train_config.get("dump_path") is not None
+            and Path(train_config["dump_path"]).resolve() == dump_path
         )
+        views = _checkpoint_weight_views(
+            checkpoint,
+            compute_device,
+            include_training_weights=include_training_weights,
+            checkpoint_label=str(checkpoint_path),
+        )
+
+        checkpoint_hash = _sha256(checkpoint_path)
+        for weight_view, model in views:
+            model_rows = _score_model(model, batches, compute_device)
+            output["models"].append(
+                {
+                    "checkpoint": str(checkpoint_path),
+                    "checkpoint_sha256": checkpoint_hash,
+                    "checkpoint_step": int(checkpoint["step"]),
+                    "weight_view": weight_view,
+                    "matches_training_dump": matches_training_dump,
+                    "summary": _summary(model_rows),
+                    "per_task": model_rows,
+                }
+            )
     return output
 
 
@@ -255,6 +315,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-tasks", type=int, default=128)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--no-baseline", action="store_true")
+    parser.add_argument(
+        "--include-training-weights",
+        action="store_true",
+        help="also reconstruct and score ScheduleFree's live training weights",
+    )
     parser.add_argument("--baseline-trees", type=int, default=100)
     parser.add_argument(
         "--output", help="New JSON path; existing files are never overwritten"
@@ -267,6 +332,7 @@ def main(argv: list[str] | None = None) -> None:
         device=args.device,
         baseline=not args.no_baseline,
         baseline_trees=args.baseline_trees,
+        include_training_weights=args.include_training_weights,
     )
     rendered = json.dumps(result, indent=2, sort_keys=True, allow_nan=False)
     if args.output:
@@ -282,6 +348,7 @@ def main(argv: list[str] | None = None) -> None:
                         {
                             "checkpoint": model["checkpoint"],
                             "checkpoint_step": model["checkpoint_step"],
+                            "weight_view": model["weight_view"],
                             "matches_training_dump": model["matches_training_dump"],
                             "summary": model["summary"],
                         }

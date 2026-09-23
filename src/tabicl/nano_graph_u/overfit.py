@@ -1,9 +1,10 @@
-"""Diagnostic: repeatedly fit one *fixed* Graph-U table with a fresh Nano model.
+"""Diagnostic: repeatedly fit one *fixed Graph-U batch* with a fresh Nano model.
 
-This intentionally trains on the selected table's query labels. It tests
-whether the model and optimization path can memorize a single task; its score
-is *not* an unbiased evaluation or a generalization estimate. The input dump
-is opened read-only, and no model checkpoint is written.
+This intentionally trains on the selected batch's query labels. It tests
+whether the model and optimization path can fit the same collection of tasks
+when it is presented repeatedly; its score is *not* an unbiased evaluation or
+a generalization estimate. The input dump is opened read-only, and no model
+checkpoint is written.
 """
 
 from __future__ import annotations
@@ -36,18 +37,31 @@ def _query_metrics(
         logits = model((x, y[:, :split].float()), train_test_split_index=split)
         targets = y[:, split:]
         if tuple(logits.shape) != (*targets.shape, 2):
-            raise ValueError("Nano output shape does not match fixed-table targets")
+            raise ValueError("Nano output shape does not match fixed-batch targets")
         nll = float(F.cross_entropy(logits.reshape(-1, 2), targets.reshape(-1)))
-        positive_probs = logits.softmax(dim=-1)[..., 1].reshape(-1).cpu().numpy()
-        labels = targets.reshape(-1).cpu().numpy()
+        probabilities_by_task = logits.softmax(dim=-1)[..., 1].cpu().numpy()
+        labels_by_task = targets.cpu().numpy()
+        positive_probs = probabilities_by_task.reshape(-1)
+        labels = labels_by_task.reshape(-1)
         predictions = logits.argmax(dim=-1).reshape(-1).cpu().numpy()
     if not math.isfinite(nll) or not np.isfinite(positive_probs).all():
-        raise FloatingPointError("Non-finite fixed-table predictions")
-    if len(np.unique(labels)) != 2:
-        raise ValueError("Selected query partition must contain both classes")
+        raise FloatingPointError("Non-finite fixed-batch predictions")
+    if any(len(np.unique(task_labels)) != 2 for task_labels in labels_by_task):
+        raise ValueError("Every selected query partition must contain both classes")
     return {
         "query_nll": nll,
-        "query_roc_auc": float(roc_auc_score(labels, positive_probs)),
+        "mean_query_roc_auc": float(
+            np.mean(
+                [
+                    roc_auc_score(task_labels, task_probs)
+                    for task_labels, task_probs in zip(
+                        labels_by_task,
+                        probabilities_by_task,
+                        strict=True,
+                    )
+                ]
+            )
+        ),
         "query_accuracy": float(np.mean(predictions == labels)),
         "positive_probability_mean": float(np.mean(positive_probs)),
         "positive_probability_variance": float(np.var(positive_probs)),
@@ -56,29 +70,29 @@ def _query_metrics(
     }
 
 
-def overfit_fixed_table(
+def overfit_fixed_batch(
     dump_path: str | Path,
     *,
-    table_index: int = 0,
+    batch_step: int = 0,
     steps: int = 1000,
     seed: int = 42,
     learning_rate: float = 0.004,
     log_every: int = 50,
     device: str = "cuda",
 ) -> dict[str, Any]:
-    """Repeat a single committed training table for ``steps`` optimizer updates.
+    """Repeat one complete committed batch for ``steps`` optimizer updates.
 
-    ``table_index`` is zero-based across the entire dump. This diagnostic
-    deliberately exposes that table's query labels as loss targets on every
+    ``batch_step`` is zero-based across the batches in the dump. This diagnostic
+    deliberately reuses every table's query labels as loss targets on every
     update; they are never supplied as model input. It never updates the
     production checkpoint or the dump.
     """
     if (
-        isinstance(table_index, bool)
-        or not isinstance(table_index, int)
-        or table_index < 0
+        isinstance(batch_step, bool)
+        or not isinstance(batch_step, int)
+        or batch_step < 0
     ):
-        raise ValueError("table_index must be a non-negative integer")
+        raise ValueError("batch_step must be a non-negative integer")
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
         raise ValueError("steps must be a positive integer")
     if isinstance(log_every, bool) or not isinstance(log_every, int) or log_every < 1:
@@ -95,21 +109,19 @@ def overfit_fixed_table(
     dump_path = Path(dump_path).expanduser().resolve()
     if not dump_path.is_file():
         raise FileNotFoundError(f"Nano prior dump not found: {dump_path}")
-    # Read only the batch containing the requested table. The standard loader
-    # verifies all per-table boundaries and labels before we select one table.
+    # The standard loader verifies every table and the shared boundary before
+    # returning the selected complete batch.
     with _require_h5py().File(dump_path, "r") as stream:
         if "metadata_json" not in stream.attrs:
             raise ValueError("file is not a Nano-Graph-U prior dump")
         batch_size = int(json.loads(stream.attrs["metadata_json"])["batch_size"])
     info = NanoPriorDumpLoader(dump_path, device="cpu", batch_size=batch_size)
     if info.committed_steps != int(info.metadata["steps"]):
-        raise ValueError("fixed-table diagnostic requires a completed prior dump")
-    committed_tables = info.committed_steps * batch_size
-    if table_index >= committed_tables:
+        raise ValueError("fixed-batch diagnostic requires a completed prior dump")
+    if batch_step >= info.committed_steps:
         raise ValueError(
-            f"table_index {table_index} is outside {committed_tables} committed tables"
+            f"batch_step {batch_step} is outside {info.committed_steps} committed batches"
         )
-    batch_step, within_batch = divmod(table_index, batch_size)
     loader = NanoPriorDumpLoader(
         dump_path,
         batch_size=batch_size,
@@ -120,14 +132,10 @@ def overfit_fixed_table(
     batch = next(iter(loader))
     split = int(batch["train_test_split_index"])
     compute_device = torch.device(device)
-    x = batch["x"][within_batch : within_batch + 1].to(
-        device=compute_device, dtype=torch.float32
-    )
-    y = batch["y"][within_batch : within_batch + 1].to(
-        device=compute_device, dtype=torch.long
-    )
+    x = batch["x"].to(device=compute_device, dtype=torch.float32)
+    y = batch["y"].to(device=compute_device, dtype=torch.long)
     if not 0 < split < y.shape[1]:
-        raise ValueError("Selected table has an invalid support/query boundary")
+        raise ValueError("Selected batch has an invalid support/query boundary")
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -141,7 +149,8 @@ def overfit_fixed_table(
 
     history = [{"step": 0, **_query_metrics(model, x, y, split)}]
     print(
-        f"fixed_table={table_index} support={split} query={y.shape[1] - split} "
+        f"fixed_batch={batch_step} tables={len(x)} support={split} "
+        f"query={y.shape[1] - split} "
         f"step=0/{steps} query_nll={history[0]['query_nll']:.6f}",
         flush=True,
     )
@@ -153,7 +162,7 @@ def overfit_fixed_table(
         targets = y[:, split:]
         loss = F.cross_entropy(logits.reshape(-1, 2), targets.reshape(-1))
         if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite fixed-table loss at step {step}")
+            raise FloatingPointError(f"Non-finite fixed-batch loss at step {step}")
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -167,7 +176,7 @@ def overfit_fixed_table(
                 history.append({"step": step, **metrics})
                 print(
                     f"step={step}/{steps} query_nll={metrics['query_nll']:.6f} "
-                    f"query_auc={metrics['query_roc_auc']:.6f}",
+                    f"mean_query_auc={metrics['mean_query_roc_auc']:.6f}",
                     flush=True,
                 )
             finally:
@@ -182,18 +191,20 @@ def overfit_fixed_table(
         )
     )
     result = {
-        "format": "nano_graph_u_fixed_table_overfit_v1",
-        "purpose": "memorization diagnostic; query labels reused as loss targets, not a generalization score",
+        "format": "nano_graph_u_fixed_batch_overfit_v1",
+        "purpose": "fixed-batch fitting diagnostic; query labels reused as loss targets, not a generalization score",
         "dump": str(dump_path),
         "dump_sha256": _sha256_file(dump_path),
         "dump_metadata": info.metadata,
-        "table_index": table_index,
         "batch_step": batch_step,
-        "within_batch_index": within_batch,
+        "batch_size": batch_size,
+        "task_count": len(x),
+        "first_table_index": batch_step * batch_size,
+        "table_index_end_exclusive": (batch_step + 1) * batch_size,
         "support_rows": split,
         "query_rows": int(y.shape[1] - split),
-        "support_positive_count": int(y[:, :split].sum().item()),
-        "query_positive_count": int(y[:, split:].sum().item()),
+        "support_positive_fraction": float(y[:, :split].float().mean().item()),
+        "query_positive_fraction": float(y[:, split:].float().mean().item()),
         "steps": steps,
         "seed": seed,
         "device": str(compute_device),
@@ -218,7 +229,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--output", required=True, help="New JSON report path; never overwritten"
     )
-    parser.add_argument("--table-index", type=int, default=0)
+    parser.add_argument("--batch-step", type=int, default=0)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--learning-rate", type=float, default=0.004)
@@ -229,9 +240,9 @@ def main(argv: list[str] | None = None) -> None:
     output = Path(args.output).expanduser().resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite existing report: {output}")
-    result = overfit_fixed_table(
+    result = overfit_fixed_batch(
         args.dump,
-        table_index=args.table_index,
+        batch_step=args.batch_step,
         steps=args.steps,
         seed=args.seed,
         learning_rate=args.learning_rate,
