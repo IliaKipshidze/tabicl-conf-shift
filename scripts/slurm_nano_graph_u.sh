@@ -23,6 +23,7 @@ NANO_RUN_MODE="${RUN_MODE:-smoke}"
 NANO_CONDITION="${CONDITION:-shift}"
 NANO_DATA_SEED="${DATA_SEED:-42}"
 NANO_MODEL_SEED="${MODEL_SEED:-42}"
+NANO_LEARNING_RATE="${LEARNING_RATE:-0.004}"
 
 case "${NANO_RUN_MODE}" in
     smoke)
@@ -67,13 +68,32 @@ if ! [[ "${NANO_LOCATION}" =~ ^-?[0-9]+([.][0-9]+)?$ ]] ||
     echo "QUERY_LOCATION and QUERY_SCALE must be decimal numbers" >&2
     exit 1
 fi
+if ! [[ "${NANO_MODEL_SEED}" =~ ^[0-9]+$ ]]; then
+    echo "MODEL_SEED must be a non-negative integer" >&2
+    exit 1
+fi
+if ! [[ "${NANO_LEARNING_RATE}" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+    echo "LEARNING_RATE must be a positive decimal number" >&2
+    exit 1
+fi
 
 NANO_SHIFT_TAG="loc_${NANO_LOCATION}_scale_${NANO_SCALE}"
 NANO_SHIFT_TAG="${NANO_SHIFT_TAG//-/m}"
 NANO_SHIFT_TAG="${NANO_SHIFT_TAG//./p}"
 NANO_RUN_TAG="${NANO_CONDITION}_${NANO_SHIFT_TAG}_${NANO_RUN_MODE}_${NANO_STEPS}steps_b${NANO_BATCH_SIZE}_r${NANO_ROWS}_f${NANO_FEATURES}"
 NANO_DUMP="${DUMP_PATH:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/${NANO_RUN_TAG}/train.h5}"
-NANO_CHECKPOINT_DIR="${CHECKPOINT_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/${NANO_RUN_TAG}}"
+NANO_LEARNING_RATE_TAG="${NANO_LEARNING_RATE//-/m}"
+NANO_LEARNING_RATE_TAG="${NANO_LEARNING_RATE_TAG//+/p}"
+NANO_LEARNING_RATE_TAG="${NANO_LEARNING_RATE_TAG//./p}"
+NANO_LEGACY_CHECKPOINT_DIR="${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/${NANO_RUN_TAG}"
+if [[ "${NANO_MODEL_SEED}" == "42" && "${NANO_LEARNING_RATE}" == "0.004" ]]; then
+    # Preserve the original paper-recipe path so existing runs still resume.
+    NANO_DEFAULT_CHECKPOINT_DIR="${NANO_LEGACY_CHECKPOINT_DIR}"
+else
+    # A different optimizer configuration must never resume the legacy model.
+    NANO_DEFAULT_CHECKPOINT_DIR="${NANO_LEGACY_CHECKPOINT_DIR}/models/seed_${NANO_MODEL_SEED}_lr_${NANO_LEARNING_RATE_TAG}"
+fi
+NANO_CHECKPOINT_DIR="${CHECKPOINT_DIR:-${NANO_DEFAULT_CHECKPOINT_DIR}}"
 
 # A repeated submission must not write the same dump or checkpoint concurrently.
 mkdir -p "${NANO_DUMP%/*}" "${NANO_CHECKPOINT_DIR}"
@@ -95,11 +115,16 @@ cd "${NANO_REPO_DIR}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 
-python - <<'PY'
+python - "${NANO_LEARNING_RATE}" <<'PY'
 import h5py
+import math
 import schedulefree
+import sys
 import torch
 
+learning_rate = float(sys.argv[1])
+if not math.isfinite(learning_rate) or learning_rate <= 0:
+    raise SystemExit("LEARNING_RATE must be finite and positive")
 print(f"PyTorch: {torch.__version__}; CUDA build: {torch.version.cuda}")
 print(f"CUDA available: {torch.cuda.is_available()}")
 if not torch.cuda.is_available():
@@ -109,6 +134,7 @@ print(f"h5py: {h5py.__version__}; schedulefree import: OK")
 PY
 
 echo "Nano mode=${NANO_RUN_MODE} condition=${NANO_CONDITION} location=${NANO_LOCATION} scale=${NANO_SCALE}"
+echo "Model seed=${NANO_MODEL_SEED} learning rate=${NANO_LEARNING_RATE}"
 echo "Prior dump=${NANO_DUMP}"
 echo "Checkpoint directory=${NANO_CHECKPOINT_DIR}"
 
@@ -128,6 +154,7 @@ NANO_TRAIN_ARGS=(
     train --dump "${NANO_DUMP}" --checkpoint-dir "${NANO_CHECKPOINT_DIR}"
     --steps "${NANO_STEPS}" --batch-size "${NANO_BATCH_SIZE}"
     --seed "${NANO_MODEL_SEED}" --device cuda
+    --learning-rate "${NANO_LEARNING_RATE}"
     --save-every "${NANO_SAVE_EVERY}" --log-every 25
 )
 if [[ -f "${NANO_CHECKPOINT_DIR}/latest.pt" ]]; then

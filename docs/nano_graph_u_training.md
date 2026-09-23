@@ -106,6 +106,14 @@ duplicate submission fails rather than writing concurrently. Every 250
 updates, training saves `latest.pt` and a
 numbered `step-*.pt`. These files are separate from TabICL's `.ckpt` files.
 
+`MODEL_SEED` and `LEARNING_RATE` may be overridden at submission time. Runs
+using a non-default model seed or learning rate automatically receive a
+configuration-specific checkpoint subdirectory unless `CHECKPOINT_DIR` is
+explicitly set, so they cannot accidentally resume the default seed-42,
+learning-rate-0.004 model. These options affect model training only; an already
+completed matching HDF5 dump is validated and reused without regenerating its
+tables.
+
 ## Frozen synthetic evaluation
 
 Use independent evaluation data (default seed 424242). Evaluate **both**
