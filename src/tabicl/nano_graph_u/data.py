@@ -32,6 +32,19 @@ from tabicl.prior.graph_lib._config import PriorConfig
 
 _FORMAT_VERSION = 1
 _MAX_STEP_RETRIES = 8
+_SEED_SCHEME = "seedsequence_step_retry_file_v1"
+
+
+def _seed_batch(seed: int, step: int, retry: int) -> None:
+    """Initialize each library from the file, batch and retry identifiers."""
+    # Keep the identifiers separate: adding them makes nearby file seeds reuse
+    # other files' batches. Counters precede the potentially large file seed.
+    python_sequence, numpy_sequence, torch_sequence = np.random.SeedSequence(
+        [step, retry, seed]
+    ).spawn(3)
+    random.seed(int(python_sequence.generate_state(1, dtype=np.uint64)[0]))
+    np.random.seed(numpy_sequence.generate_state(4, dtype=np.uint32))
+    torch.manual_seed(int(torch_sequence.generate_state(1, dtype=np.uint64)[0]))
 
 
 def _generator_source_sha256() -> str:
@@ -222,6 +235,7 @@ def _metadata(
         "steps": steps,
         "batch_size": batch_size,
         "seed": seed,
+        "seed_scheme": _SEED_SCHEME,
         "rows": rows,
         "features": features,
         "min_train_size": min_train_size,
@@ -251,10 +265,7 @@ def _generate_step(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate one independent batch, identically in parent or spawned worker."""
     for retry in range(_MAX_STEP_RETRIES):
-        step_seed = seed + step + retry * 1_000_003
-        random.seed(step_seed)
-        np.random.seed(step_seed % (2**32))
-        torch.manual_seed(step_seed)
+        _seed_batch(seed, step, retry)
         prior = create_prior(
             prior_config,
             batch_size=batch_size,

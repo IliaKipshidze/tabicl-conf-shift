@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import random
+
+import numpy as np
 import pytest
 import torch
 
-from tabicl.nano_graph_u.data import NanoPriorDumpLoader, adapt_batch, generate_dump
+from tabicl.nano_graph_u import data as nano_data
+from tabicl.nano_graph_u.data import (
+    NanoPriorDumpLoader,
+    _generate_step,
+    _seed_batch,
+    adapt_batch,
+    generate_dump,
+)
 from tabicl.nano_graph_u.model import NanoTabPFNModel
 from tabicl.prior.graph_lib._config import PriorConfig
 
@@ -52,6 +63,57 @@ def test_nano_rejects_splits_too_small_for_normalization(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ((1001, 1000, 0), (2001, 0, 0)),
+        ((1001, 1, 0), (1002, 0, 0)),
+        ((1001, 0, 1), (1001 + 1_000_003, 0, 0)),
+        ((1001, 0, 0), (1001, 0, 1)),
+    ],
+)
+def test_nano_batch_seeds_separate_files_batches_and_retries(first, second):
+    def draw(identifiers):
+        _seed_batch(*identifiers)
+        return (
+            [random.getrandbits(64) for _ in range(8)],
+            np.random.randint(0, 2**32, size=8, dtype=np.uint32),
+            torch.rand(8),
+        )
+
+    initial = draw(first)
+    other = draw(second)
+    repeated = draw(first)
+    assert initial[0] == repeated[0]
+    np.testing.assert_array_equal(initial[1], repeated[1])
+    assert torch.equal(initial[2], repeated[2])
+    assert initial[0] != other[0]
+    assert not np.array_equal(initial[1], other[1])
+    assert not torch.equal(initial[2], other[2])
+
+
+def test_nano_previously_overlapping_train_test_seeds_generate_distinct_batches():
+    kwargs = {
+        "prior_config": PriorConfig(
+            graph_u_enabled=True,
+            graph_u_structure_mode="add_root",
+            graph_u_query_location=2.0,
+            graph_u_query_scale=1.5,
+        ),
+        "batch_size": 2,
+        "rows": 64,
+        "features": 3,
+        "min_train_size": 0.3,
+        "max_train_size": 0.9,
+    }
+    training = _generate_step(1000, seed=1001, **kwargs)
+    testing = _generate_step(0, seed=2001, **kwargs)
+    repeated = _generate_step(1000, seed=1001, **kwargs)
+    assert not np.array_equal(training[0], testing[0])
+    for original, replay in zip(training, repeated):
+        np.testing.assert_array_equal(original, replay)
+
+
 def test_nano_parallel_generation_is_identical_and_resume_checks_code(
     tmp_path, monkeypatch
 ):
@@ -59,6 +121,7 @@ def test_nano_parallel_generation_is_identical_and_resume_checks_code(
     prior_config = PriorConfig(graph_u_enabled=True, graph_u_structure_mode="add_root")
     serial = tmp_path / "serial.h5"
     parallel = tmp_path / "parallel.h5"
+    resumed = tmp_path / "resumed.h5"
     kwargs = {
         "steps": 2,
         "batch_size": 2,
@@ -69,9 +132,37 @@ def test_nano_parallel_generation_is_identical_and_resume_checks_code(
     }
     generate_dump(serial, workers=1, **kwargs)
     generate_dump(parallel, workers=2, **kwargs)
-    with h5py.File(serial, "r") as first, h5py.File(parallel, "r") as second:
+
+    write_step = nano_data._write_step
+
+    def interrupt_second_batch(file, step, batch_size, arrays):
+        if step == 1:
+            # Simulate a partially written batch that was never committed.
+            file["x"][step * batch_size] = np.nan
+            file.flush()
+            raise RuntimeError("simulated interruption")
+        write_step(file, step, batch_size, arrays)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(nano_data, "_write_step", interrupt_second_batch)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            generate_dump(resumed, workers=1, **kwargs)
+    with h5py.File(resumed, "r") as stream:
+        assert stream.attrs["committed_steps"] == 1
+        assert np.isnan(stream["x"][kwargs["batch_size"]]).all()
+
+    generate_dump(resumed, workers=2, resume=True, **kwargs)
+    with (
+        h5py.File(serial, "r") as first,
+        h5py.File(parallel, "r") as second,
+        h5py.File(resumed, "r") as third,
+    ):
         for key in ("x", "y", "train_sizes"):
-            assert (first[key][:] == second[key][:]).all()
+            np.testing.assert_array_equal(first[key][:], second[key][:])
+            np.testing.assert_array_equal(first[key][:], third[key][:])
+        metadata = json.loads(first.attrs["metadata_json"])
+        assert metadata["seed_scheme"] == "seedsequence_step_retry_file_v1"
+        assert first.attrs["metadata_json"] == third.attrs["metadata_json"]
 
     monkeypatch.setattr(
         "tabicl.nano_graph_u.data._generator_source_sha256", lambda: "changed-code"
