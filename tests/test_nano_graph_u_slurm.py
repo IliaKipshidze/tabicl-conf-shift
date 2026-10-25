@@ -14,6 +14,8 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_generate.sh"
 TUNE_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_tune.sh"
 SELECT_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_select.sh"
+TEST_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_test.sh"
+SUMMARY_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_summarize.sh"
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +53,7 @@ def job_env(tmp_path):
         NANO_ENV_PATH=shell_path(tmp_path / "env"),
         NANO_DATA_ROOT=shell_path(tmp_path / "data banks"),
         NANO_SEARCH_ROOT=shell_path(tmp_path / "search outputs"),
+        NANO_TEST_ROOT=shell_path(tmp_path / "test outputs"),
         SLURM_CPUS_PER_TASK="8",
         NANO_TEST_ARGS_LOG=shell_path(tmp_path / "arguments.txt"),
         NANO_TEST_EXIT_CODE="0",
@@ -266,3 +269,92 @@ def test_tuning_or_selection_failure_cannot_report_completion(
     assert result.returncode == 7
     assert "JOB_COMPLETE" not in result.stdout
     assert "SELECTION_COMPLETE" not in result.stdout
+
+
+def test_winner_test_plan_matches_all_20_python_specs(bash, job_env, tmp_path):
+    from tabicl.nano_graph_u.test_winners import test_spec as make_spec
+
+    result = run_script(bash, job_env, "--dry-run", script=TEST_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    plans = [
+        dict(field.split("=", 1) for field in line.split())
+        for line in result.stdout.splitlines()
+        if line.startswith("test=")
+    ]
+    checkpoints = [
+        line.removeprefix("Checkpoint=")
+        for line in result.stdout.splitlines()
+        if line.startswith("Checkpoint=")
+    ]
+    dumps = [
+        line.removeprefix("Test bank=")
+        for line in result.stdout.splitlines()
+        if line.startswith("Test bank=")
+    ]
+    reports = [
+        line.removeprefix("Result=")
+        for line in result.stdout.splitlines()
+        if line.startswith("Result=")
+    ]
+    assert len(plans) == len(set(reports)) == 20
+    assert len(set(checkpoints)) == len(set(dumps)) == 10
+    for task_id, plan in enumerate(plans, start=1):
+        spec = make_spec(task_id, tmp_path / "banks", tmp_path / "search", tmp_path / "results")
+        assert int(plan["test"]) == spec["task_id"]
+        assert int(plan["repetition"]) == spec["repetition"]
+        assert plan["training"] == spec["training_condition"]
+        assert plan["evaluation"] == spec["test_condition"]
+        assert int(plan["test_seed"]) == 2000 + spec["repetition"]
+        assert int(plan["tables"]) == 3200
+        for paths, key, levels in (
+            (checkpoints, "checkpoint", 4),
+            (dumps, "test_dump", 2),
+            (reports, "result_path", 2),
+        ):
+            suffix = "/".join(Path(spec[key]).parts[-levels:])
+            assert paths[task_id - 1].endswith("/" + suffix)
+    assert "tabicl.nano_graph_u.test_winners" in result.stdout
+    assert "tabicl.nano_graph_u generate" not in result.stdout
+    assert not (tmp_path / "test outputs").exists()
+
+
+@pytest.mark.parametrize("task", ["1", "2", "3", "4", "20"])
+def test_winner_test_job_calls_only_frozen_model_evaluation(
+    bash, job_env, tmp_path, mock_conda, task
+):
+    job_env["SLURM_ARRAY_TASK_ID"] = task
+    result = run_script(bash, job_env, script=TEST_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[:3] == ["-u", "-m", "tabicl.nano_graph_u.test_winners"]
+    assert arguments[arguments.index("--task-id") + 1] == task
+    assert arguments[arguments.index("--device") + 1] == "cuda"
+    assert "TEST_JOB_COMPLETE" in result.stdout
+
+
+@pytest.mark.parametrize("task", ["", "0", "21"])
+def test_winner_test_job_rejects_invalid_task(bash, job_env, tmp_path, task):
+    job_env["SLURM_ARRAY_TASK_ID"] = task
+    result = run_script(bash, job_env, script=TEST_SCRIPT)
+    assert result.returncode != 0
+    assert "from 1 to 20" in result.stderr
+    assert not (tmp_path / "arguments.txt").exists()
+
+
+def test_summary_job_only_collects_saved_test_reports(bash, job_env, tmp_path, mock_conda):
+    result = run_script(bash, job_env, script=SUMMARY_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[:3] == ["-u", "-m", "tabicl.nano_graph_u.summarize_tests"]
+    assert "SUMMARY_COMPLETE" in result.stdout
+
+
+@pytest.mark.parametrize("script", [TEST_SCRIPT, SUMMARY_SCRIPT])
+def test_final_testing_failure_cannot_report_completion(
+    bash, job_env, tmp_path, mock_conda, script
+):
+    job_env.update(SLURM_ARRAY_TASK_ID="1", NANO_TEST_EXIT_CODE="7")
+    result = run_script(bash, job_env, script=script)
+    assert result.returncode == 7
+    assert "JOB_COMPLETE" not in result.stdout
+    assert "SUMMARY_COMPLETE" not in result.stdout
