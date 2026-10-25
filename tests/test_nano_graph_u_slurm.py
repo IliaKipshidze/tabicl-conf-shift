@@ -12,6 +12,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_generate.sh"
+TUNE_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_tune.sh"
+SELECT_SCRIPT = REPO / "scripts" / "slurm_nano_graph_u_select.sh"
 
 
 @pytest.fixture(scope="module")
@@ -48,6 +50,7 @@ def job_env(tmp_path):
         NANO_CONDA_ROOT=shell_path(tmp_path / "conda"),
         NANO_ENV_PATH=shell_path(tmp_path / "env"),
         NANO_DATA_ROOT=shell_path(tmp_path / "data banks"),
+        NANO_SEARCH_ROOT=shell_path(tmp_path / "search outputs"),
         SLURM_CPUS_PER_TASK="8",
         NANO_TEST_ARGS_LOG=shell_path(tmp_path / "arguments.txt"),
         NANO_TEST_EXIT_CODE="0",
@@ -56,9 +59,9 @@ def job_env(tmp_path):
     return env
 
 
-def run_script(bash, env, *arguments):
+def run_script(bash, env, *arguments, script=SCRIPT):
     return subprocess.run(
-        [bash, str(SCRIPT), *arguments],
+        [bash, str(script), *arguments],
         env=env,
         cwd=REPO,
         capture_output=True,
@@ -143,7 +146,8 @@ def mock_conda(tmp_path):
     initialization.parent.mkdir(parents=True)
     initialization.write_text(
         "conda() { return 0; }\n"
-        'python() { printf "%s\\n" "$@" > "${NANO_TEST_ARGS_LOG}"; '
+        'python() { if [[ "${1:-}" == "-" ]]; then return 0; fi; '
+        'printf "%s\\n" "$@" > "${NANO_TEST_ARGS_LOG}"; '
         'return "${NANO_TEST_EXIT_CODE}"; }\n'
         'flock() { return "${NANO_TEST_FLOCK_EXIT_CODE}"; }\n',
         encoding="utf-8",
@@ -187,3 +191,78 @@ def test_generation_failure_cannot_report_completion(
     if failure == "lock":
         assert not (tmp_path / "arguments.txt").exists()
         assert "Another generation job" in result.stderr
+
+
+def test_tuning_slurm_plan_matches_all_100_python_trial_specs(bash, job_env, tmp_path):
+    from tabicl.nano_graph_u.tune import trial_spec
+
+    result = run_script(bash, job_env, "--dry-run", script=TUNE_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    plans = [
+        dict(field.split("=", 1) for field in line.split())
+        for line in result.stdout.splitlines()
+        if line.startswith("trial=")
+    ]
+    directories = [
+        line.removeprefix("Candidate directory=")
+        for line in result.stdout.splitlines()
+        if line.startswith("Candidate directory=")
+    ]
+    assert len(plans) == len(set(directories)) == 100
+    for task_id, plan in enumerate(plans, start=1):
+        spec = trial_spec(task_id, tmp_path / "data", tmp_path / "search")
+        assert int(plan["trial"]) == spec["task_id"]
+        assert int(plan["repetition"]) == spec["repetition"]
+        assert plan["condition"] == spec["condition"]
+        assert int(plan["model_seed"]) == spec["model_seed"]
+        assert float(plan["learning_rate"]) == spec["learning_rate"]
+        assert int(plan["steps"]) == 2500
+        assert directories[task_id - 1].endswith(
+            f"/rep_{spec['repetition']}/{spec['condition']}/"
+            + Path(spec["checkpoint_dir"]).parent.name
+        )
+    assert "tabicl.nano_graph_u.tune trial" in result.stdout
+    assert "tabicl.nano_graph_u generate" not in result.stdout
+    assert not (tmp_path / "search outputs").exists()
+
+
+@pytest.mark.parametrize("task", ["1", "10", "11", "20", "81", "100"])
+def test_tuning_job_runs_only_its_candidate_and_validation(
+    bash, job_env, tmp_path, mock_conda, task
+):
+    job_env["SLURM_ARRAY_TASK_ID"] = task
+    result = run_script(bash, job_env, script=TUNE_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[:4] == ["-u", "-m", "tabicl.nano_graph_u.tune", "trial"]
+    assert arguments[arguments.index("--task-id") + 1] == task
+    assert arguments[arguments.index("--device") + 1] == "cuda"
+    assert "TUNING_JOB_COMPLETE" in result.stdout
+
+
+@pytest.mark.parametrize("task", ["", "0", "101"])
+def test_tuning_job_rejects_missing_or_invalid_task(bash, job_env, tmp_path, task):
+    job_env["SLURM_ARRAY_TASK_ID"] = task
+    result = run_script(bash, job_env, script=TUNE_SCRIPT)
+    assert result.returncode != 0
+    assert "from 1 to 100" in result.stderr
+    assert not (tmp_path / "arguments.txt").exists()
+
+
+def test_selection_job_calls_only_winner_selection(bash, job_env, tmp_path, mock_conda):
+    result = run_script(bash, job_env, script=SELECT_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[:3] == ["-u", "-m", "tabicl.nano_graph_u.select"]
+    assert "SELECTION_COMPLETE" in result.stdout
+
+
+@pytest.mark.parametrize("script", [TUNE_SCRIPT, SELECT_SCRIPT])
+def test_tuning_or_selection_failure_cannot_report_completion(
+    bash, job_env, tmp_path, mock_conda, script
+):
+    job_env.update(SLURM_ARRAY_TASK_ID="1", NANO_TEST_EXIT_CODE="7")
+    result = run_script(bash, job_env, script=script)
+    assert result.returncode == 7
+    assert "JOB_COMPLETE" not in result.stdout
+    assert "SELECTION_COMPLETE" not in result.stdout
