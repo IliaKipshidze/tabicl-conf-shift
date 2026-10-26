@@ -537,6 +537,7 @@ class SavePriorDataset:
             "replay_small": self.args.replay_small,
             "graph_noise": self.args.graph_noise,
             "graph_u_enabled": getattr(self.args, "graph_u_enabled", False),
+            "graph_u_mode": getattr(self.args, "graph_u_mode", "confounding"),
             "graph_u_structure_mode": getattr(
                 self.args, "graph_u_structure_mode", "reject"
             ),

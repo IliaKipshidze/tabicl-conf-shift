@@ -44,9 +44,9 @@ class RandomGraphFunction(RandomTransformer):
             if not 0 <= self.graph_u_node_idx < len(self.dag):
                 raise ValueError(f"graph_u_node_idx={self.graph_u_node_idx} is outside the DAG")
             if self.dag[self.graph_u_node_idx]:
-                raise ValueError("The Graph-U confounder must be a root node")
+                raise ValueError("The Graph-U source must be a root node")
             if self.node_feature_specs[self.graph_u_node_idx]:
-                raise ValueError("The Graph-U confounder must be hidden")
+                raise ValueError("The Graph-U source must be hidden")
 
             x_children = {
                 node_idx
@@ -60,7 +60,13 @@ class RandomGraphFunction(RandomTransformer):
                 if self.graph_u_node_idx in self.dag[node_idx]
                 and any(feature_spec.group == "y" for feature_spec in feature_specs.values())
             }
-            if not any(x_child != y_child for x_child in x_children for y_child in y_children):
+            if self.config.graph_u_mode == "covariate":
+                if not x_children or y_children:
+                    raise ValueError(
+                        "The covariate Graph-U source must directly parent an observed X node "
+                        "and no observed Y node"
+                    )
+            elif not any(x_child != y_child for x_child in x_children for y_child in y_children):
                 raise ValueError(
                     "The Graph-U confounder must directly parent distinct observed X and Y nodes"
                 )
@@ -106,7 +112,7 @@ class RandomGraphFunction(RandomTransformer):
         if self.config.graph_u_enabled:
             assert self.graph_u_node_idx is not None
             if not self.should_compute_[self.graph_u_node_idx]:
-                raise ValueError("The selected Graph-U confounder is not an ancestor of an observed feature")
+                raise ValueError("The selected Graph-U source is not an ancestor of an observed feature")
 
     def _transform(self, n_samples: int) -> Dict[str, torch.Tensor]:
         self._validate_graph_u_boundary(n_samples)

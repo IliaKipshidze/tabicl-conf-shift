@@ -43,12 +43,17 @@ class PriorConfig:
     use_corrected_cat_meta_sampling: bool = False
     graph_u_enabled: bool = False
     graph_u_structure_mode: Literal["reject", "add_root"] = "reject"
+    graph_u_mode: Literal["confounding", "covariate"] = "confounding"
     graph_u_query_location: float = 0.0
     graph_u_query_scale: float = 1.0
     graph_u_force_gaussian: bool = False
     graph_u_max_attempts: int = 1000
 
     def __post_init__(self) -> None:
+        if not isinstance(self.graph_u_mode, str) or self.graph_u_mode not in {
+            "confounding", "covariate"
+        }:
+            raise ValueError("graph_u_mode must be 'confounding' or 'covariate'")
         if not isinstance(self.graph_u_structure_mode, str) or (
             self.graph_u_structure_mode not in {"reject", "add_root"}
         ):
@@ -68,6 +73,8 @@ class PriorConfig:
             raise ValueError("graph_u_max_attempts must be positive")
         self.graph_u_max_attempts = int(self.graph_u_max_attempts)
         if self.graph_u_enabled:
+            if self.graph_u_mode == "covariate" and self.graph_u_structure_mode != "add_root":
+                raise ValueError("graph_u_mode='covariate' requires graph_u_structure_mode='add_root'")
             minimum_nodes = 2 if self.graph_u_structure_mode == "add_root" else 3
             if self.max_n_nodes < minimum_nodes:
                 raise ValueError(
@@ -110,6 +117,7 @@ class PriorConfig:
                            use_corrected_cat_meta_sampling=args.use_corrected_cat_meta_sampling,
                            graph_u_enabled=getattr(args, "graph_u_enabled", False),
                            graph_u_structure_mode=getattr(args, "graph_u_structure_mode", "reject"),
+                           graph_u_mode=getattr(args, "graph_u_mode", "confounding"),
                            graph_u_query_location=getattr(args, "graph_u_query_location", 0.0),
                            graph_u_query_scale=getattr(args, "graph_u_query_scale", 1.0),
                            graph_u_force_gaussian=getattr(args, "graph_u_force_gaussian", False),
@@ -280,35 +288,44 @@ class PriorConfig:
             "--graph_u_enabled",
             default=False,
             type=str2bool,
-            help="Whether to require and shift one hidden root confounder in graph_scm tasks.",
+            help="Whether to select or insert and shift one hidden root in graph_scm tasks.",
         )
         parser.add_argument(
             "--graph_u_structure_mode",
             default="reject",
             choices=("reject", "add_root"),
             help=(
-                "How to obtain the hidden confounder: reject ordinary DAGs without "
-                "one, or add a new hidden root to every ordinary DAG."
+                "How to obtain U: reject ordinary DAGs without a hidden confounder, "
+                "or add a new hidden root using graph_u_mode."
+            ),
+        )
+        parser.add_argument(
+            "--graph_u_mode",
+            default="confounding",
+            choices=("confounding", "covariate"),
+            help=(
+                "Injected root edges: 'confounding' adds U->X and U->Y; "
+                "'covariate' adds U->X only (requires add_root)."
             ),
         )
         parser.add_argument(
             "--graph_u_query_location",
             default=0.0,
             type=float,
-            help="Location added to the selected confounder's query source samples.",
+            help="Location added to the selected hidden root's query source samples.",
         )
         parser.add_argument(
             "--graph_u_query_scale",
             default=1.0,
             type=float,
-            help="Positive scale applied to the selected confounder's query source samples.",
+            help="Positive scale applied to the selected hidden root's query source samples.",
         )
         parser.add_argument(
             "--graph_u_force_gaussian",
             default=False,
             type=str2bool,
             help=(
-                "Whether the selected confounder must use a Gaussian base source "
+                "Whether the selected hidden root must use a Gaussian base source "
                 "instead of the usual randomly selected source family."
             ),
         )

@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 import numpy as np
 
@@ -73,8 +73,10 @@ def find_graph_u_candidates(
 def construct_graph_u_root(
     graph: List[List[int]],
     node_feature_specs: List[Dict[str, FeatureSpec]],
-) -> tuple[List[List[int]], List[Dict[str, FeatureSpec]], int, int]:
-    """Prepend a hidden root and connect it to distinct observed X/Y nodes.
+    *,
+    mode: Literal["confounding", "covariate"] = "confounding",
+) -> tuple[List[List[int]], List[Dict[str, FeatureSpec]], int, int | None]:
+    """Prepend a hidden root, connecting it to X and optionally Y.
 
     The supplied graph is treated as an ordinary, unconditioned base DAG. Its
     nodes and edges are preserved modulo the index shift caused by prepending
@@ -86,9 +88,13 @@ def construct_graph_u_root(
     -------
     graph, node_feature_specs, x_child_idx, y_child_idx
         The augmented graph/specifications and the (shifted) indices of the two
-        children to which the new root was explicitly connected. The inserted
-        Graph-U node always has index zero.
+        children to which the new root was explicitly connected. In covariate
+        mode, the Y child is None because no U->Y edge is added. The inserted
+        Graph-U node always has index zero. This mode does not filter causal
+        paths or assert invariance of the conditional target distribution.
     """
+    if mode not in {"confounding", "covariate"}:
+        raise ValueError("mode must be 'confounding' or 'covariate'")
     if len(graph) != len(node_feature_specs):
         raise ValueError(
             "graph and node_feature_specs must describe the same number of nodes "
@@ -115,7 +121,7 @@ def construct_graph_u_root(
         raise ValueError("Constructed Graph-U requires at least one observed X and Y feature")
 
     distinct_pairs = [(x_idx, y_idx) for x_idx in x_nodes for y_idx in y_nodes if x_idx != y_idx]
-    if not distinct_pairs:
+    if not distinct_pairs or (mode == "covariate" and not set(x_nodes).difference(y_nodes)):
         # Both groups occur only on one shared node. Relocate exactly one X
         # specification, which is the smallest feature-placement change that
         # makes node-level confounding possible without rejecting the base DAG.
@@ -125,7 +131,12 @@ def construct_graph_u_root(
             for name, feature_spec in base_feature_specs[shared_idx].items()
             if feature_spec.group == "x"
         ]
-        other_nodes = [node_idx for node_idx in range(len(base_graph)) if node_idx != shared_idx]
+        other_nodes = [
+            node_idx for node_idx in range(len(base_graph))
+            if node_idx != shared_idx and (mode == "confounding" or node_idx not in y_nodes)
+        ]
+        if not other_nodes:
+            raise ValueError("Covariate Graph-U requires a base node without observed Y features")
         feature_name = x_feature_names[int(np.random.randint(len(x_feature_names)))]
         target_idx = other_nodes[int(np.random.randint(len(other_nodes)))]
         base_feature_specs[target_idx][feature_name] = base_feature_specs[shared_idx].pop(feature_name)
@@ -134,18 +145,26 @@ def construct_graph_u_root(
             (x_idx, y_idx) for x_idx in x_nodes for y_idx in y_nodes if x_idx != y_idx
         ]
 
+    if mode == "covariate":
+        # An edge into a node exposing both X and Y is also a direct U->Y
+        # connection. The selected X child must therefore expose no Y feature.
+        distinct_pairs = [(x_idx, y_idx) for x_idx, y_idx in distinct_pairs if x_idx not in y_nodes]
+
     pair_idx = int(np.random.randint(len(distinct_pairs)))
     base_x_child_idx, base_y_child_idx = distinct_pairs[pair_idx]
 
     # Index zero is a new empty-spec root. All ordinary base-DAG edges are
-    # retained with indices shifted by one, and only the two mandatory outgoing
-    # U edges are added.
+    # retained with indices shifted by one. Both modes sample the same child
+    # pair; covariate mode omits only the direct outgoing edge into Y.
     augmented_graph = [[]] + [[parent_idx + 1 for parent_idx in parents] for parents in base_graph]
     augmented_feature_specs = [{}] + base_feature_specs
     x_child_idx = base_x_child_idx + 1
     y_child_idx = base_y_child_idx + 1
     augmented_graph[x_child_idx] = [0, *augmented_graph[x_child_idx]]
-    augmented_graph[y_child_idx] = [0, *augmented_graph[y_child_idx]]
+    if mode == "confounding":
+        augmented_graph[y_child_idx] = [0, *augmented_graph[y_child_idx]]
+    else:
+        y_child_idx = None
 
     return augmented_graph, augmented_feature_specs, x_child_idx, y_child_idx
 
@@ -154,6 +173,7 @@ class RandomDataset(PriorComponent):
     def sample(self, data_prop: DatasetProperties) -> Dataset:
         graph_u_enabled = bool(getattr(self.config, "graph_u_enabled", False))
         graph_u_structure_mode = getattr(self.config, "graph_u_structure_mode", "reject")
+        graph_u_mode = getattr(self.config, "graph_u_mode", "confounding")
         graph_u_max_attempts = getattr(self.config, "graph_u_max_attempts", 100)
         if graph_u_enabled:
             if not isinstance(graph_u_max_attempts, (int, np.integer)) or graph_u_max_attempts < 1:
@@ -210,10 +230,13 @@ class RandomDataset(PriorComponent):
             if graph_u_enabled and graph_u_structure_mode == "add_root":
                 base_n_nodes = n_nodes
                 graph, node_feature_specs, constructed_x_child_idx, constructed_y_child_idx = (
-                    construct_graph_u_root(graph, node_feature_specs)
+                    construct_graph_u_root(graph, node_feature_specs, mode=graph_u_mode)
                 )
                 graph_u_candidates = [0]
-                graph_is_predictable = check_x_y_ancestors_overlap(graph, node_feature_specs)
+                graph_is_predictable = (
+                    (graph_u_mode == "covariate" and not self.config.filter_unpredictable_graphs)
+                    or check_x_y_ancestors_overlap(graph, node_feature_specs)
+                )
             else:
                 graph_is_predictable = (
                     (not self.config.filter_unpredictable_graphs)
@@ -225,13 +248,19 @@ class RandomDataset(PriorComponent):
             if graph_is_predictable and ((not graph_u_enabled) or graph_u_candidates):
                 break
 
-            if graph_u_enabled and graph_u_structure_mode == "add_root":
+            if graph_u_enabled and graph_u_structure_mode == "add_root" and graph_u_mode == "confounding":
                 raise RuntimeError(
                     "Constructed Graph-U failed to produce a predictable augmented graph; "
                     "this indicates an internal construction error"
                 )
 
             if graph_u_enabled and n_attempts >= graph_u_max_attempts:
+                if graph_u_mode == "covariate":
+                    raise RuntimeError(
+                        "Unable to sample a valid covariate Graph-U dataset after "
+                        f"{graph_u_max_attempts} attempts: the existing "
+                        "filter_unpredictable_graphs policy rejected disconnected X/Y graphs"
+                    )
                 n_x_features = sum(
                     feature_spec.group == "x" for feature_spec in data_prop.feature_specs.values()
                 )
@@ -298,6 +327,7 @@ class RandomDataset(PriorComponent):
             graph_u_y_child_node_idxs=tuple(graph_u_y_child_node_idxs),
             graph_u_attempts=n_attempts,
             graph_u_structure_mode=graph_u_structure_mode if graph_u_enabled else None,
+            graph_u_mode=graph_u_mode if graph_u_enabled else None,
             graph_u_base_n_nodes=base_n_nodes,
             graph_u_constructed_x_child_node_idx=constructed_x_child_idx,
             graph_u_constructed_y_child_node_idx=constructed_y_child_idx,

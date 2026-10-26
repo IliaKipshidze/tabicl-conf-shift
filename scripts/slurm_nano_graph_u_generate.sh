@@ -9,6 +9,8 @@
 
 # Generate only: no model training or evaluation.
 # Submit: sbatch scripts/slurm_nano_graph_u_generate.sh
+# Feature-only U construction and its identity control:
+# sbatch --export=ALL,GRAPH_U_MODE=covariate scripts/slurm_nano_graph_u_generate.sh
 # Preview all banks: bash scripts/slurm_nano_graph_u_generate.sh --dry-run
 # Array tasks 1--20 are four banks per repetition:
 #   identity train, shift train, identity test, shift test.
@@ -21,7 +23,13 @@ NANO_CLUSTER_ROOT="${NANO_CLUSTER_ROOT:-/home/bin/CISPA-scratch/c01ilki}"
 NANO_REPO_DIR="${NANO_REPO_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift}"
 NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
-NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions}"
+NANO_GRAPH_U_MODE="${GRAPH_U_MODE:-confounding}"
+case "${NANO_GRAPH_U_MODE}" in
+    confounding) NANO_MODE_SUFFIX="" ;;
+    covariate) NANO_MODE_SUFFIX="_covariate" ;;
+    *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
+NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_MODE_SUFFIX}}"
 NANO_CPUS="${SLURM_CPUS_PER_TASK:-8}"
 NANO_WORKERS="${WORKERS:-${NANO_CPUS}}"
 NANO_BANK_ID="${SLURM_ARRAY_TASK_ID:-}"
@@ -91,12 +99,13 @@ configure_bank() {
         --n-jobs 1 --workers "${NANO_WORKERS}"
         --min-train-size 0.3 --max-train-size 0.9
         --structure-mode add_root --max-attempts 1000
+        --graph-u-mode "${NANO_GRAPH_U_MODE}"
         --query-location "${NANO_LOCATION}" --query-scale "${NANO_SCALE}"
     )
 }
 
 print_plan() {
-    echo "bank=${NANO_BANK_ID} repetition=${NANO_REPETITION} split=${NANO_SPLIT} condition=${NANO_CONDITION} seed=${NANO_SEED} batches=${NANO_STEPS} tables=$(( NANO_STEPS * 32 )) workers=${NANO_WORKERS}"
+    echo "bank=${NANO_BANK_ID} repetition=${NANO_REPETITION} split=${NANO_SPLIT} condition=${NANO_CONDITION} graph_u_mode=${NANO_GRAPH_U_MODE} seed=${NANO_SEED} batches=${NANO_STEPS} tables=$(( NANO_STEPS * 32 )) workers=${NANO_WORKERS}"
     echo "Dump=${NANO_DUMP}"
     printf 'Command:'
     printf ' %q' python -u -m tabicl.nano_graph_u "${NANO_GENERATE_ARGS[@]}"

@@ -191,6 +191,34 @@ def test_condition_resolution_uses_one_reference_for_all_models(tmp_path):
     assert config.graph_u_max_attempts == 123
 
 
+@pytest.mark.parametrize("mode", ["confounding", "covariate"])
+def test_condition_resolution_preserves_graph_u_mode(tmp_path, mode):
+    reference = _descriptor(tmp_path)
+    reference = dataclasses.replace(
+        reference, prior_config={**reference.prior_config, "graph_u_mode": mode}
+    )
+    conditions = resolve_conditions(
+        [parse_condition(name) for name in ("identity", "matched", "custom:3:2")],
+        reference,
+    )
+    for condition in conditions:
+        assert condition.mode == mode
+        assert condition.as_dict()["graph_u_mode"] == mode
+        assert build_prior_config(reference, condition).graph_u_mode == mode
+
+
+def test_legacy_condition_resolution_defaults_to_confounding(tmp_path):
+    reference = _descriptor(tmp_path)
+    prior_config = dict(reference.prior_config)
+    prior_config.pop("graph_u_mode", None)
+    reference = dataclasses.replace(reference, prior_config=prior_config)
+    conditions = resolve_conditions(
+        [parse_condition("identity"), parse_condition("matched")], reference
+    )
+    assert all(condition.mode == "confounding" for condition in conditions)
+    assert prior_reconstruction_details(reference)["complete"] is True
+
+
 def test_default_conditions_only_include_matched_when_recorded(tmp_path):
     graph_u_reference = _descriptor(tmp_path, graph_u=True)
     legacy_reference = CheckpointDescriptor(

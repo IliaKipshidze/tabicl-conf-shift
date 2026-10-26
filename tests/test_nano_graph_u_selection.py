@@ -20,14 +20,18 @@ from tabicl.prior.graph_lib._config import PriorConfig
 def make_search(tmp_path):
     h5py = pytest.importorskip("h5py")
 
-    def create(*, separate_fingerprints=False):
+    def create(*, separate_fingerprints=False, graph_u_mode="confounding"):
         data_root, output_root = tmp_path / "banks", tmp_path / "search"
         metadata_by_path = {}
-        specs = [trial_spec(task, data_root, output_root) for task in range(1, 101)]
+        specs = [
+            trial_spec(task, data_root, output_root, graph_u_mode=graph_u_mode)
+            for task in range(1, 101)
+        ]
         for spec in specs:
             condition = spec["condition"]
             prior = PriorConfig(
                 graph_u_enabled=True,
+                graph_u_mode=graph_u_mode,
                 graph_u_structure_mode="add_root",
                 graph_u_query_location=0.0 if condition == "identity" else 2.0,
                 graph_u_query_scale=1.0 if condition == "identity" else 1.5,
@@ -255,3 +259,13 @@ def test_selection_recovers_after_interrupted_winner_retention(
     assert not (output_root / "winners" / "winners.json").exists()
     manifest = selection.select_winners(data_root, output_root)
     assert len(manifest["winners"]) == 10
+
+
+def test_covariate_selection_retains_mode_and_rejects_confounding_request(make_search):
+    data, output, _ = make_search(graph_u_mode="covariate")
+    manifest = selection.select_winners(data, output, graph_u_mode="covariate")
+    assert manifest["graph_u_mode"] == "covariate"
+    assert len(manifest["winners"]) == 10
+    assert selection.select_winners(data, output, graph_u_mode="covariate") == manifest
+    with pytest.raises(ValueError, match="different candidate"):
+        selection.select_winners(data, output)

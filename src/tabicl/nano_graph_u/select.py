@@ -63,7 +63,9 @@ def _retain_checkpoint(source: Path, destination: Path, expected_hash: str) -> N
             temporary.unlink(missing_ok=True)
 
 
-def select_winners(data_root: str | Path, output_root: str | Path) -> dict[str, Any]:
+def select_winners(
+    data_root: str | Path, output_root: str | Path, *, graph_u_mode: str = "confounding"
+) -> dict[str, Any]:
     """Validate all 100 trials, then retain one winner per repetition/condition.
 
     Exact AUROC ties are resolved by the smaller learning rate. Neither test
@@ -72,7 +74,10 @@ def select_winners(data_root: str | Path, output_root: str | Path) -> dict[str, 
     """
     data_root = Path(data_root).expanduser().resolve()
     output_root = Path(output_root).expanduser().resolve()
-    specs = [trial_spec(task_id, data_root, output_root) for task_id in range(1, 101)]
+    specs = [
+        trial_spec(task_id, data_root, output_root, graph_u_mode=graph_u_mode)
+        for task_id in range(1, 101)
+    ]
     missing = [
         spec["result_path"] for spec in specs if not Path(spec["result_path"]).is_file()
     ]
@@ -150,6 +155,8 @@ def select_winners(data_root: str | Path, output_root: str | Path) -> dict[str, 
         "learning_rates": list(LEARNING_RATES),
         "winners": winners,
     }
+    if graph_u_mode != "confounding":
+        manifest["graph_u_mode"] = graph_u_mode
     manifest_bytes = (
         json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode()
@@ -200,8 +207,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument(
+        "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
+    )
     args = parser.parse_args(argv)
-    manifest = select_winners(args.data_root, args.output_root)
+    manifest = select_winners(
+        args.data_root, args.output_root, graph_u_mode=args.graph_u_mode
+    )
     for winner in manifest["winners"]:
         print(
             f"rep={winner['repetition']} condition={winner['condition']} "

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -142,12 +142,64 @@ def test_construct_graph_u_root_repairs_single_shared_x_y_node_without_rejection
     assert any(spec.group == "y" for spec in augmented_specs[y_child].values())
     assert 0 in augmented_graph[x_child]
     assert 0 in augmented_graph[y_child]
-    assert sum(
-        spec.group == "x" for node_specs in augmented_specs for spec in node_specs.values()
-    ) == 1
-    assert sum(
-        spec.group == "y" for node_specs in augmented_specs for spec in node_specs.values()
-    ) == 1
+    assert (
+        sum(
+            spec.group == "x"
+            for node_specs in augmented_specs
+            for spec in node_specs.values()
+        )
+        == 1
+    )
+    assert (
+        sum(
+            spec.group == "y"
+            for node_specs in augmented_specs
+            for spec in node_specs.values()
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("shared_node", [False, True])
+def test_covariate_construction_omits_only_the_injected_y_edge(shared_node):
+    graph = [[], [0], [0, 1]]
+    specs = (
+        [_feature_specs("x", "y"), {}, {}]
+        if shared_node
+        else [_feature_specs("x"), _feature_specs("x"), _feature_specs("y")]
+    )
+    np.random.seed(314)
+    conf_graph, conf_specs, conf_x, conf_y = construct_graph_u_root(graph, specs)
+    conf_next_random = np.random.rand()
+    np.random.seed(314)
+    cov_graph, cov_specs, cov_x, cov_y = construct_graph_u_root(
+        graph, specs, mode="covariate"
+    )
+    assert np.random.rand() == conf_next_random
+    assert cov_specs == conf_specs
+    assert cov_x == conf_x
+    assert cov_y is None
+    expected_graph = [list(parents) for parents in conf_graph]
+    expected_graph[conf_y].remove(0)
+    assert cov_graph == expected_graph
+    assert cov_specs[0] == {}
+    assert 0 in cov_graph[cov_x]
+    assert all(spec.group != "y" for spec in cov_specs[cov_x].values())
+    assert not find_graph_u_candidates(cov_graph, cov_specs)
+
+
+def test_covariate_construction_never_connects_u_to_a_node_also_exposing_y():
+    graph, specs, x_child, y_child = construct_graph_u_root(
+        [[], [0], [0]],
+        [_feature_specs("x", "y"), {"other_y": FeatureSpec(group="y")}, {}],
+        mode="covariate",
+    )
+    assert x_child == 3
+    assert y_child is None
+    assert specs[x_child]
+    for node_idx, node_specs in enumerate(specs):
+        if any(spec.group == "y" for spec in node_specs.values()):
+            assert 0 not in graph[node_idx]
 
 
 class _IdentityRandomFunction:
@@ -245,9 +297,7 @@ def test_direct_graph_u_points_fit_root_function_on_support_only():
             graph_u_force_gaussian=True,
             fct_types="tree",
         )
-        return RandomPoints(Context(config=config)).sample(
-            20, 3, graph_u_n_train=12
-        )
+        return RandomPoints(Context(config=config)).sample(20, 3, graph_u_n_train=12)
 
     identity = generate(0.0, 1.0)
     shifted = generate(4.0, 2.0)
@@ -330,6 +380,27 @@ def test_graph_u_does_not_force_gaussian_by_default():
     assert PriorConfig().graph_u_force_gaussian is False
 
 
+def test_graph_u_covariate_mode_config_and_cli():
+    assert PriorConfig().graph_u_mode == "confounding"
+    parser = argparse.ArgumentParser()
+    PriorConfig.add_args_to_parser(parser)
+    args = parser.parse_args(
+        [
+            "--graph_u_enabled",
+            "true",
+            "--graph_u_structure_mode",
+            "add_root",
+            "--graph_u_mode",
+            "covariate",
+        ]
+    )
+    assert PriorConfig.from_args(args).graph_u_mode == "covariate"
+    with pytest.raises(ValueError, match="requires graph_u_structure_mode='add_root'"):
+        PriorConfig(graph_u_enabled=True, graph_u_mode="covariate")
+    with pytest.raises(ValueError, match="graph_u_mode must be"):
+        PriorConfig(graph_u_mode="invalid")
+
+
 def test_graph_u_lazy_transformers_fit_on_support_only():
     context = Context(config=PriorConfig(graph_u_enabled=True)).with_fit_boundary(4, 6)
     support = torch.tensor([[0.0], [1.0], [2.0], [3.0]])
@@ -392,9 +463,12 @@ def test_graph_u_feature_retention_is_decided_from_support_only():
         (True, "prod"),
     ],
 )
-@pytest.mark.parametrize("structure_mode", ["reject", "add_root"])
+@pytest.mark.parametrize(
+    "mode,structure_mode",
+    [("confounding", "reject"), ("confounding", "add_root"), ("covariate", "add_root")],
+)
 def test_same_seed_graph_u_shift_preserves_final_support(
-    regression, fct_types, structure_mode
+    regression, fct_types, structure_mode, mode
 ):
     def generate(query_location: float, query_scale: float):
         np.random.seed(7)
@@ -402,6 +476,7 @@ def test_same_seed_graph_u_shift_preserves_final_support(
         config = PriorConfig(
             graph_u_enabled=True,
             graph_u_structure_mode=structure_mode,
+            graph_u_mode=mode,
             graph_u_query_location=query_location,
             graph_u_query_scale=query_scale,
             graph_u_force_gaussian=True,
@@ -430,12 +505,19 @@ def test_same_seed_graph_u_shift_preserves_final_support(
     assert identity_metadata["graph"] == shifted_metadata["graph"]
     assert identity_metadata["graph_u_node_idx"] == shifted_metadata["graph_u_node_idx"]
     assert identity_metadata["graph_u_fit_policy"] == "support_only"
+    if mode == "covariate":
+        assert identity_metadata["graph_u_y_child_node_idxs"] == ()
+        assert identity_metadata["graph_u_constructed_y_child_node_idx"] is None
     torch.testing.assert_close(identity_X[:32], shifted_X[:32], rtol=0, atol=0)
     torch.testing.assert_close(identity_y[:32], shifted_y[:32], rtol=0, atol=0)
-    assert not (
-        torch.equal(identity_X[32:], shifted_X[32:])
-        and torch.equal(identity_y[32:], shifted_y[32:])
-    )
+    if mode == "confounding" or fct_types == "default":
+        assert not (
+            torch.equal(identity_X[32:], shifted_X[32:])
+            and torch.equal(identity_y[32:], shifted_y[32:])
+        )
+    # A random empirical-map mechanism can erase a source shift entirely. The
+    # deterministic propagation test below verifies routing independently of
+    # whether a sampled mechanism preserves a visible effect in its output.
 
 
 def test_graph_u_requires_graph_scm_prior_type():
@@ -797,7 +879,7 @@ class _FixedDAG:
 
 
 class _RecordingGraphFunction:
-    calls: list[dict[str, Any]] = []
+    calls: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(
         self,
@@ -903,7 +985,9 @@ def test_constructed_graph_u_handles_94_features_with_one_dag_proposal(monkeypat
             return np.zeros(size, dtype=int)
         return original_choice(values, *args, **kwargs)
 
-    monkeypatch.setattr(dataset_module.np.random, "choice", place_all_features_on_first_node)
+    monkeypatch.setattr(
+        dataset_module.np.random, "choice", place_all_features_on_first_node
+    )
     config = PriorConfig(
         graph_u_enabled=True,
         graph_u_structure_mode="add_root",
@@ -933,13 +1017,84 @@ def test_constructed_graph_u_handles_94_features_with_one_dag_proposal(monkeypat
     call = _RecordingGraphFunction.calls[-1]
     assert call["graph_u_node_idx"] == 0
     assert call["node_feature_specs"][0] == {}
-    assert call["graph_u_node_idx"] in call["dag"][dataset.kwargs["graph_u_constructed_x_child_node_idx"]]
-    assert call["graph_u_node_idx"] in call["dag"][dataset.kwargs["graph_u_constructed_y_child_node_idx"]]
+    assert (
+        call["graph_u_node_idx"]
+        in call["dag"][dataset.kwargs["graph_u_constructed_x_child_node_idx"]]
+    )
+    assert (
+        call["graph_u_node_idx"]
+        in call["dag"][dataset.kwargs["graph_u_constructed_y_child_node_idx"]]
+    )
+
+
+@pytest.mark.parametrize("filter_graphs,expected_attempts", [(False, 1), (True, 2)])
+def test_covariate_graphs_follow_existing_predictability_filter(
+    monkeypatch, filter_graphs, expected_attempts
+):
+    class DisconnectedThenConnectedDAG:
+        calls = 0
+
+        def __init__(self, _context):
+            pass
+
+        def sample(self, _n_nodes):
+            self.__class__.calls += 1
+            return [[], []] if self.calls == 1 else [[], [0]]
+
+    monkeypatch.setattr(dataset_module, "RandomDAG", DisconnectedThenConnectedDAG)
+    monkeypatch.setattr(dataset_module, "RandomGraphFunction", _RecordingGraphFunction)
+    config = PriorConfig(
+        graph_u_enabled=True,
+        graph_u_structure_mode="add_root",
+        graph_u_mode="covariate",
+        graph_u_max_attempts=2,
+        min_n_nodes=2,
+        max_n_nodes=2,
+        filter_unpredictable_graphs=filter_graphs,
+    )
+    properties = DatasetProperties(n_train=4, n_test=2, cat_sizes={"x": [0], "y": [2]})
+    dataset = RandomDataset(Context(config=config)).sample(properties)
+    assert DisconnectedThenConnectedDAG.calls == expected_attempts
+    assert dataset.kwargs["graph_u_attempts"] == expected_attempts
+    assert dataset.kwargs["graph_u_y_child_node_idxs"] == ()
+    assert dataset.kwargs["graph_u_constructed_y_child_node_idx"] is None
+    assert dataset.kwargs["graph_u_mode"] == "covariate"
+    assert dataset.kwargs["graph_u_node_idx"] == 0
+    assert set(dataset.tensors) == set(properties.feature_specs)
+
+
+def test_covariate_predictability_retries_are_bounded(monkeypatch):
+    class DisconnectedDAG:
+        calls = 0
+
+        def __init__(self, _context):
+            pass
+
+        def sample(self, _n_nodes):
+            self.__class__.calls += 1
+            return [[], []]
+
+    monkeypatch.setattr(dataset_module, "RandomDAG", DisconnectedDAG)
+    config = PriorConfig(
+        graph_u_enabled=True,
+        graph_u_structure_mode="add_root",
+        graph_u_mode="covariate",
+        graph_u_max_attempts=3,
+        min_n_nodes=2,
+        max_n_nodes=2,
+        filter_unpredictable_graphs=True,
+    )
+    properties = DatasetProperties(n_train=4, n_test=2, cat_sizes={"x": [0], "y": [2]})
+    with pytest.raises(
+        RuntimeError, match="after 3 attempts.*filter_unpredictable_graphs"
+    ):
+        RandomDataset(Context(config=config)).sample(properties)
+    assert DisconnectedDAG.calls == 3
 
 
 class _DeterministicNodeFunction:
-    boundaries: list[int | None] = []
-    fit_boundaries: list[tuple[int | None, int | None]] = []
+    boundaries: ClassVar[list[int | None]] = []
+    fit_boundaries: ClassVar[list[tuple[int | None, int | None]]] = []
 
     def __init__(self, _context, feature_specs, *, graph_u_n_train=None):
         self.feature_specs = feature_specs
@@ -997,6 +1152,65 @@ def test_graph_u_source_shift_propagates_through_all_descendants(monkeypatch):
 
     with pytest.raises(RuntimeError, match="cannot be evaluated twice"):
         graph_function(4)
+
+
+@pytest.mark.parametrize("y_descendant", [False, True])
+def test_covariate_source_shift_propagates_only_through_existing_descendants(
+    monkeypatch, y_descendant
+):
+    monkeypatch.setattr(
+        graph_function_module, "RandomNodeFunction", _DeterministicNodeFunction
+    )
+    _DeterministicNodeFunction.boundaries.clear()
+    graph_function = RandomGraphFunction(
+        Context(
+            config=PriorConfig(
+                graph_u_enabled=True,
+                graph_u_structure_mode="add_root",
+                graph_u_mode="covariate",
+            )
+        ),
+        dag=[[], [0], [1], [1] if y_descendant else []],
+        node_feature_specs=[
+            {},
+            _feature_specs("x"),
+            {"x_descendant": FeatureSpec(group="x")},
+            _feature_specs("y"),
+        ],
+        graph_u_node_idx=0,
+        n_train=2,
+    )
+    features = graph_function(4)
+    assert _DeterministicNodeFunction.boundaries == [2, None, None, None]
+    torch.testing.assert_close(
+        features["x_0"].squeeze(-1), torch.tensor([1.0, 2.0, 103.0, 104.0])
+    )
+    torch.testing.assert_close(
+        features["x_descendant"].squeeze(-1), torch.tensor([2.0, 3.0, 104.0, 105.0])
+    )
+    expected_y = (
+        torch.tensor([2.0, 3.0, 104.0, 105.0])
+        if y_descendant
+        else torch.tensor([0.0, 1.0, 2.0, 3.0])
+    )
+    torch.testing.assert_close(features["y_0"].squeeze(-1), expected_y)
+
+
+def test_covariate_graph_function_rejects_a_direct_y_child():
+    with pytest.raises(ValueError, match="no observed Y node"):
+        RandomGraphFunction(
+            Context(
+                config=PriorConfig(
+                    graph_u_enabled=True,
+                    graph_u_structure_mode="add_root",
+                    graph_u_mode="covariate",
+                )
+            ),
+            dag=[[], [0], [0]],
+            node_feature_specs=[{}, _feature_specs("x"), _feature_specs("y")],
+            graph_u_node_idx=0,
+            n_train=2,
+        )
 
 
 @pytest.mark.parametrize(

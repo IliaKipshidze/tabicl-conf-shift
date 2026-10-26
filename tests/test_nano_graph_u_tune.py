@@ -16,9 +16,10 @@ from tabicl.nano_graph_u.train import PAPER_MODEL_CONFIG, _sha256_file
 from tabicl.prior.graph_lib._config import PriorConfig
 
 
-def _prior(condition):
+def _prior(condition, graph_u_mode="confounding"):
     return PriorConfig(
         graph_u_enabled=True,
+        graph_u_mode=graph_u_mode,
         graph_u_structure_mode="add_root",
         graph_u_query_location=0.0 if condition == "identity" else 2.0,
         graph_u_query_scale=1.0 if condition == "identity" else 1.5,
@@ -30,10 +31,10 @@ def _prior(condition):
     )
 
 
-def _bank(path, condition, steps, seed):
+def _bank(path, condition, steps, seed, graph_u_mode="confounding"):
     h5py = pytest.importorskip("h5py")
     metadata = _metadata(
-        _prior(condition),
+        _prior(condition, graph_u_mode),
         steps=steps,
         batch_size=32,
         seed=seed,
@@ -55,12 +56,20 @@ def _bank(path, condition, steps, seed):
     return metadata
 
 
-def _setup(tmp_path, task=1):
-    spec = tune.trial_spec(task, tmp_path / "data", tmp_path / "output")
-    training = _bank(
-        spec["train_dump"], spec["condition"], 2500, 1000 + spec["repetition"]
+def _setup(tmp_path, task=1, graph_u_mode="confounding"):
+    spec = tune.trial_spec(
+        task, tmp_path / "data", tmp_path / "output", graph_u_mode=graph_u_mode
     )
-    validation = _bank(spec["validation_dump"], spec["condition"], 100, 3001)
+    training = _bank(
+        spec["train_dump"],
+        spec["condition"],
+        2500,
+        1000 + spec["repetition"],
+        graph_u_mode,
+    )
+    validation = _bank(
+        spec["validation_dump"], spec["condition"], 100, 3001, graph_u_mode
+    )
     return spec, training, validation
 
 
@@ -291,3 +300,48 @@ def test_result_hash_cache_reuses_reads_but_detects_changed_files(
     with pytest.raises(ValueError, match="Checkpoint changed"):
         tune.validate_trial_result(result, spec, hash_cache=cache)
     assert len(hashed) == 4
+
+
+@pytest.mark.parametrize("task", [1, 11])
+def test_covariate_trial_validates_and_reuses_only_matching_mode(
+    tmp_path, monkeypatch, task
+):
+    spec, training, validation = _setup(tmp_path, task, graph_u_mode="covariate")
+    checkpoint = _checkpoint(spec, training)
+    monkeypatch.setattr(tune, "train_model", lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(
+        tune, "evaluate_checkpoint", lambda *args, **kwargs: _report(spec, validation)
+    )
+    result = tune.run_trial(
+        task,
+        tmp_path / "data",
+        tmp_path / "output",
+        device="cpu",
+        graph_u_mode="covariate",
+    )
+    assert result["trial"]["graph_u_mode"] == "covariate"
+    assert tune.validate_trial_result(result, spec) == 0.83
+    with pytest.raises(ValueError, match="prior_config"):
+        tune.run_trial(task, tmp_path / "data", tmp_path / "output", device="cpu")
+
+
+def test_legacy_metadata_missing_mode_remains_confounding_without_mutation():
+    metadata = _metadata(
+        _prior("identity"),
+        steps=100,
+        batch_size=32,
+        seed=3001,
+        rows=150,
+        features=5,
+        min_train_size=0.3,
+        max_train_size=0.9,
+        n_jobs=1,
+    )
+    del metadata["prior_config"]["graph_u_mode"]
+    before = copy.deepcopy(metadata)
+    assert tune._validate_metadata(metadata, "identity", "validation") == 100
+    assert metadata == before
+    with pytest.raises(ValueError, match="prior_config"):
+        tune._validate_metadata(
+            metadata, "identity", "validation", graph_u_mode="covariate"
+        )

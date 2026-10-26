@@ -27,7 +27,10 @@ def bash():
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             probe = subprocess.run(
-                [candidate, "-c", "exit 0"], capture_output=True, timeout=10, check=False
+                [candidate, "-c", "exit 0"],
+                capture_output=True,
+                timeout=10,
+                check=False,
             )
             if probe.returncode == 0:
                 return candidate
@@ -44,7 +47,7 @@ def shell_path(path: Path) -> str:
 @pytest.fixture
 def job_env(tmp_path):
     env = dict(os.environ)
-    for key in ("SLURM_ARRAY_TASK_ID", "WORKERS"):
+    for key in ("SLURM_ARRAY_TASK_ID", "WORKERS", "GRAPH_U_MODE"):
         env.pop(key, None)
     env.update(
         NANO_CLUSTER_ROOT=shell_path(tmp_path),
@@ -115,7 +118,13 @@ def test_generation_array_plans_exactly_the_22_agreed_banks(bash, job_env, tmp_p
             ("0.0", "1.0") if condition == "identity" else ("2.0", "1.5")
         )
         observed.add(
-            (directory.rsplit("/", 1)[1], condition, split, options["--seed"], options["--steps"])
+            (
+                directory.rsplit("/", 1)[1],
+                condition,
+                split,
+                options["--seed"],
+                options["--steps"],
+            )
         )
         dumps.add(dump)
     assert len(commands) == len(dumps) == 22
@@ -124,7 +133,9 @@ def test_generation_array_plans_exactly_the_22_agreed_banks(bash, job_env, tmp_p
 
 
 @pytest.mark.parametrize("task", ["", "0", "23", "../1"])
-def test_generation_job_rejects_invalid_task_before_writes(bash, job_env, tmp_path, task):
+def test_generation_job_rejects_invalid_task_before_writes(
+    bash, job_env, tmp_path, task
+):
     job_env["SLURM_ARRAY_TASK_ID"] = task
     result = run_script(bash, job_env)
     assert result.returncode != 0
@@ -299,7 +310,9 @@ def test_winner_test_plan_matches_all_20_python_specs(bash, job_env, tmp_path):
     assert len(plans) == len(set(reports)) == 20
     assert len(set(checkpoints)) == len(set(dumps)) == 10
     for task_id, plan in enumerate(plans, start=1):
-        spec = make_spec(task_id, tmp_path / "banks", tmp_path / "search", tmp_path / "results")
+        spec = make_spec(
+            task_id, tmp_path / "banks", tmp_path / "search", tmp_path / "results"
+        )
         assert int(plan["test"]) == spec["task_id"]
         assert int(plan["repetition"]) == spec["repetition"]
         assert plan["training"] == spec["training_condition"]
@@ -341,7 +354,9 @@ def test_winner_test_job_rejects_invalid_task(bash, job_env, tmp_path, task):
     assert not (tmp_path / "arguments.txt").exists()
 
 
-def test_summary_job_only_collects_saved_test_reports(bash, job_env, tmp_path, mock_conda):
+def test_summary_job_only_collects_saved_test_reports(
+    bash, job_env, tmp_path, mock_conda
+):
     result = run_script(bash, job_env, script=SUMMARY_SCRIPT)
     assert result.returncode == 0, result.stderr
     arguments = (tmp_path / "arguments.txt").read_text().splitlines()
@@ -358,3 +373,50 @@ def test_final_testing_failure_cannot_report_completion(
     assert result.returncode == 7
     assert "JOB_COMPLETE" not in result.stdout
     assert "SUMMARY_COMPLETE" not in result.stdout
+
+
+@pytest.mark.parametrize("script", [SCRIPT, TUNE_SCRIPT, TEST_SCRIPT])
+def test_covariate_plans_use_separate_default_roots_and_explicit_mode(
+    bash, job_env, tmp_path, script
+):
+    job_env["GRAPH_U_MODE"] = "covariate"
+    for name in ("NANO_DATA_ROOT", "NANO_SEARCH_ROOT", "NANO_TEST_ROOT"):
+        job_env.pop(name)
+    result = run_script(bash, job_env, "--dry-run", script=script)
+    assert result.returncode == 0, result.stderr
+    assert "--graph-u-mode covariate" in result.stdout
+    if script == SCRIPT:
+        assert "/repetitions_covariate/" in result.stdout
+        assert "--query-location 0.0 --query-scale 1.0" in result.stdout
+        assert "--query-location 2.0 --query-scale 1.5" in result.stdout
+        assert result.stdout.count("Command:") == 22
+    else:
+        assert "/lr_search_covariate/" in result.stdout
+    if script == TEST_SCRIPT:
+        assert "/lr_search_tests_covariate/" in result.stdout
+        assert "/repetitions_covariate/" in result.stdout
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "script", [SCRIPT, TUNE_SCRIPT, SELECT_SCRIPT, TEST_SCRIPT, SUMMARY_SCRIPT]
+)
+def test_covariate_mode_reaches_each_python_entrypoint(
+    bash, job_env, tmp_path, mock_conda, script
+):
+    job_env.update(GRAPH_U_MODE="covariate", SLURM_ARRAY_TASK_ID="1")
+    result = run_script(bash, job_env, script=script)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[arguments.index("--graph-u-mode") + 1] == "covariate"
+
+
+@pytest.mark.parametrize(
+    "script", [SCRIPT, TUNE_SCRIPT, SELECT_SCRIPT, TEST_SCRIPT, SUMMARY_SCRIPT]
+)
+def test_unknown_graph_u_mode_fails_before_writes(bash, job_env, tmp_path, script):
+    job_env["GRAPH_U_MODE"] = "invalid"
+    result = run_script(bash, job_env, "--dry-run", script=script)
+    assert result.returncode != 0
+    assert "GRAPH_U_MODE must be" in result.stderr
+    assert not list(tmp_path.iterdir())

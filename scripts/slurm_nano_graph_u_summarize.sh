@@ -8,6 +8,7 @@
 
 # Run after all 20 winner-test jobs complete. Summarize across five repetitions.
 # Submit: sbatch scripts/slurm_nano_graph_u_summarize.sh
+# Use the same GRAPH_U_MODE as generation and tuning.
 
 set -euo pipefail
 
@@ -15,9 +16,15 @@ NANO_CLUSTER_ROOT="${NANO_CLUSTER_ROOT:-/home/bin/CISPA-scratch/c01ilki}"
 NANO_REPO_DIR="${NANO_REPO_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift}"
 NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
-NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions}"
-NANO_SEARCH_ROOT="${NANO_SEARCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/lr_search}"
-NANO_TEST_ROOT="${NANO_TEST_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/lr_search_tests}"
+NANO_GRAPH_U_MODE="${GRAPH_U_MODE:-confounding}"
+case "${NANO_GRAPH_U_MODE}" in
+    confounding) NANO_MODE_SUFFIX="" ;;
+    covariate) NANO_MODE_SUFFIX="_covariate" ;;
+    *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
+NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_MODE_SUFFIX}}"
+NANO_SEARCH_ROOT="${NANO_SEARCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/lr_search${NANO_MODE_SUFFIX}}"
+NANO_TEST_ROOT="${NANO_TEST_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/lr_search_tests${NANO_MODE_SUFFIX}}"
 
 if [[ "${NANO_DATA_ROOT}" != /* || "${NANO_SEARCH_ROOT}" != /* || "${NANO_TEST_ROOT}" != /* ]]; then
     echo "NANO_DATA_ROOT, NANO_SEARCH_ROOT and NANO_TEST_ROOT must be absolute paths" >&2
@@ -38,5 +45,5 @@ if ! flock -n 9; then
 fi
 python -u -m tabicl.nano_graph_u.summarize_tests \
     --data-root "${NANO_DATA_ROOT}" --search-root "${NANO_SEARCH_ROOT}" \
-    --result-root "${NANO_TEST_ROOT}"
+    --result-root "${NANO_TEST_ROOT}" --graph-u-mode "${NANO_GRAPH_U_MODE}"
 echo "SUMMARY_COMPLETE results=${NANO_TEST_ROOT}/summary.csv"

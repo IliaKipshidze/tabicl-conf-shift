@@ -59,12 +59,14 @@ class EvaluationCondition:
     query_scale: float
     force_gaussian: bool
     source: str
+    mode: Literal["confounding", "covariate"] = "confounding"
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "graph_u_enabled": self.graph_u_enabled,
             "graph_u_structure_mode": self.structure_mode,
+            "graph_u_mode": self.mode,
             "graph_u_query_location": self.query_location,
             "graph_u_query_scale": self.query_scale,
             "graph_u_force_gaussian": self.force_gaussian,
@@ -314,6 +316,9 @@ def resolve_conditions(
             "Reference graph_u_structure_mode must be 'reject' or 'add_root'"
         )
     force_gaussian_recorded = "graph_u_force_gaussian" in prior_config
+    base_mode = prior_config.get("graph_u_mode", "confounding")
+    if base_mode not in {"confounding", "covariate"}:
+        raise ValueError("Reference graph_u_mode must be 'confounding' or 'covariate'")
     base_force_gaussian = prior_config.get("graph_u_force_gaussian", False)
     if not isinstance(base_force_gaussian, bool):
         raise TypeError("Reference graph_u_force_gaussian must be a boolean")
@@ -334,6 +339,7 @@ def resolve_conditions(
                 query_scale=1.0,
                 force_gaussian=base_force_gaussian,
                 source="ordinary graph_scm without Graph-U conditioning",
+                mode=base_mode,
             )
         elif spec.kind == "identity":
             policy_source = (
@@ -349,6 +355,7 @@ def resolve_conditions(
                 query_scale=1.0,
                 force_gaussian=base_force_gaussian,
                 source=policy_source,
+                mode=base_mode,
             )
         elif spec.kind == "matched":
             if matched_config is None:
@@ -365,6 +372,7 @@ def resolve_conditions(
                 query_scale=float(matched_config["graph_u_query_scale"]),
                 force_gaussian=bool(matched_config["graph_u_force_gaussian"]),
                 source=f"matched to {reference.path}",
+                mode=matched_config["graph_u_mode"],
             )
         else:
             assert spec.query_location is not None and spec.query_scale is not None
@@ -380,6 +388,7 @@ def resolve_conditions(
                     else spec.force_gaussian
                 ),
                 source="explicit CLI condition",
+                mode=base_mode,
             )
         resolved.append(condition)
     return resolved
@@ -395,6 +404,7 @@ def prior_reconstruction_details(
         stored["add_gaussian_noise"] = stored["graph_noise"]
     # Absence denotes the sole historical implementation, rejection sampling.
     stored.setdefault("graph_u_structure_mode", "reject")
+    stored.setdefault("graph_u_mode", "confounding")
     missing = sorted(_PRIOR_CONFIG_FIELDS - stored.keys())
     return {
         "source": (
@@ -463,6 +473,7 @@ def build_prior_config(
     kwargs.update(
         graph_u_enabled=condition.graph_u_enabled,
         graph_u_structure_mode=condition.structure_mode,
+        graph_u_mode=condition.mode,
         graph_u_query_location=condition.query_location,
         graph_u_query_scale=condition.query_scale,
         graph_u_force_gaussian=condition.force_gaussian,

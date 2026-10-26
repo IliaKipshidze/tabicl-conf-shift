@@ -183,3 +183,16 @@ def test_summary_cli_prints_four_cells_and_summary_location(completed_tests, cap
     assert len([line for line in lines if line.startswith("training=")]) == 4
     assert all("n=5" in line for line in lines if line.startswith("training="))
     assert "SUMMARY_READY" in lines[-1]
+
+
+def test_covariate_summary_preserves_mode_across_all_twenty_reports(completed_tests):
+    data, search, output, specs, records, validated = completed_tests
+    for spec, record in zip(specs, records):
+        record["test"]["graph_u_mode"] = "covariate"
+        rewrite(spec, record)
+    summary = summary_module.summarize_tests(
+        data, search, output, graph_u_mode="covariate"
+    )
+    assert summary["graph_u_mode"] == "covariate"
+    assert len(summary["cells"]) == 4
+    assert validated == list(range(1, 21))

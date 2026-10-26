@@ -21,6 +21,7 @@ from .tune import (
     LEARNING_RATES,
     TRAIN_STEPS,
     _is_digest,
+    _validate_graph_u_mode,
     _validate_metadata,
     trial_spec,
 )
@@ -36,6 +37,8 @@ def test_spec(
     data_root: str | Path,
     search_root: str | Path,
     result_root: str | Path,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     """Map each repetition to identity/shift winners crossed with both test banks."""
     if (
@@ -44,6 +47,7 @@ def test_spec(
         or not 1 <= task_id <= 20
     ):
         raise ValueError("task_id must be an integer from 1 to 20")
+    _validate_graph_u_mode(graph_u_mode)
     repetition, slot = divmod(task_id - 1, 4)
     repetition += 1
     training_condition = "identity" if slot < 2 else "shift"
@@ -51,7 +55,7 @@ def test_spec(
     data_root = Path(data_root).expanduser().resolve()
     search_root = Path(search_root).expanduser().resolve()
     result_root = Path(result_root).expanduser().resolve()
-    return {
+    spec = {
         "task_id": task_id,
         "repetition": repetition,
         "training_condition": training_condition,
@@ -76,24 +80,37 @@ def test_spec(
             / f"{training_condition}_on_{test_condition}.json"
         ),
     }
+    if graph_u_mode != "confounding":
+        spec["graph_u_mode"] = graph_u_mode
+    return spec
 
 
 def _validate_test_metadata(
-    metadata: dict[str, Any], condition: str, repetition: int
+    metadata: dict[str, Any],
+    condition: str,
+    repetition: int,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> None:
     if metadata.get("seed") != 2000 + repetition:
         raise ValueError("Test bank must use this repetition's independent test seed")
     # Test and validation banks have the same scientific configuration and size;
     # only their root seeds differ. Validate a copy without changing provenance.
     normalized = dict(metadata, seed=3001)
-    _validate_metadata(normalized, condition, "validation")
+    _validate_metadata(normalized, condition, "validation", graph_u_mode=graph_u_mode)
 
 
 def validate_test_bank(
-    path: str | Path, condition: str, repetition: int
+    path: str | Path,
+    condition: str,
+    repetition: int,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     loader = NanoPriorDumpLoader(path, batch_size=BATCH_SIZE, device="cpu")
-    _validate_test_metadata(loader.metadata, condition, repetition)
+    _validate_test_metadata(
+        loader.metadata, condition, repetition, graph_u_mode=graph_u_mode
+    )
     if loader.committed_steps != TEST_STEPS:
         raise ValueError(
             f"Incomplete test bank: {loader.committed_steps}/{TEST_STEPS} batches committed"
@@ -106,7 +123,12 @@ def _validate_winner_entry(
 ) -> dict[str, Any]:
     data_root = Path(spec["test_dump"]).parents[1]
     search_root = Path(spec["manifest_path"]).parents[1]
-    candidate = trial_spec(winner.get("task_id"), data_root, search_root)
+    candidate = trial_spec(
+        winner.get("task_id"),
+        data_root,
+        search_root,
+        graph_u_mode=spec.get("graph_u_mode", "confounding"),
+    )
     expected = {
         "repetition": spec["repetition"],
         "condition": spec["training_condition"],
@@ -145,6 +167,10 @@ def _validate_winner_entry(
 def _load_winner(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
     contents = Path(spec["manifest_path"]).read_bytes()
     manifest = json.loads(contents)
+    if manifest.get("graph_u_mode", "confounding") != spec.get(
+        "graph_u_mode", "confounding"
+    ):
+        raise ValueError("Winner manifest uses a different Graph-U mode")
     expected = {
         "format": WINNERS_FORMAT,
         "data_root": str(Path(spec["test_dump"]).parents[1]),
@@ -198,7 +224,11 @@ def _validate_checkpoint(
     checkpoint = torch.load(spec["checkpoint"], map_location="cpu", weights_only=True)
     metadata = checkpoint.get("dump_metadata", {})
     _validate_metadata(
-        metadata, spec["training_condition"], "train", spec["repetition"]
+        metadata,
+        spec["training_condition"],
+        "train",
+        spec["repetition"],
+        graph_u_mode=spec.get("graph_u_mode", "confounding"),
     )
     candidate = _validate_winner_entry(winner, spec)
     config = checkpoint.get("train_config", {})
@@ -259,7 +289,10 @@ def validate_test_result(
             "Test result must score the selected final model on all 3,200 test tasks"
         )
     _validate_test_metadata(
-        report.get("dump_metadata", {}), spec["test_condition"], spec["repetition"]
+        report.get("dump_metadata", {}),
+        spec["test_condition"],
+        spec["repetition"],
+        graph_u_mode=spec.get("graph_u_mode", "confounding"),
     )
     for name in METRIC_NAMES:
         value = report.get("metrics", {}).get(name)
@@ -277,7 +310,10 @@ def validate_test_result(
         if result["manifest_sha256"] != manifest_hash or winner != selected:
             raise ValueError("Winner selection changed after testing")
         metadata = validate_test_bank(
-            spec["test_dump"], spec["test_condition"], spec["repetition"]
+            spec["test_dump"],
+            spec["test_condition"],
+            spec["repetition"],
+            graph_u_mode=spec.get("graph_u_mode", "confounding"),
         )
         if (
             report["dump_metadata"] != metadata
@@ -298,11 +334,17 @@ def run_test(
     result_root: str | Path,
     *,
     device: str = "cuda",
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
-    spec = test_spec(task_id, data_root, search_root, result_root)
+    spec = test_spec(
+        task_id, data_root, search_root, result_root, graph_u_mode=graph_u_mode
+    )
     manifest, winner, manifest_hash = _load_winner(spec)
     metadata = validate_test_bank(
-        spec["test_dump"], spec["test_condition"], spec["repetition"]
+        spec["test_dump"],
+        spec["test_condition"],
+        spec["repetition"],
+        graph_u_mode=graph_u_mode,
     )
     if metadata["generator_source_sha256"] != manifest["generator_source_sha256"]:
         raise ValueError(
@@ -350,6 +392,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--search-root", required=True, type=Path)
     parser.add_argument("--result-root", required=True, type=Path)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
+    )
     args = parser.parse_args(argv)
     run_test(
         args.task_id,
@@ -357,6 +402,7 @@ def main(argv: list[str] | None = None) -> None:
         args.search_root,
         args.result_root,
         device=args.device,
+        graph_u_mode=args.graph_u_mode,
     )
 
 

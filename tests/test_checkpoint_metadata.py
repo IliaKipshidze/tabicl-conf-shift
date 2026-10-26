@@ -151,6 +151,7 @@ def test_get_matched_graph_u_config_returns_exact_training_shift():
         "prior_type": "graph_scm",
         "graph_u_enabled": True,
         "graph_u_structure_mode": "add_root",
+        "graph_u_mode": "confounding",
         "graph_u_query_location": 2.25,
         "graph_u_query_scale": 1.5,
         "graph_u_force_gaussian": False,
@@ -175,6 +176,14 @@ def test_matched_config_maps_pre_structure_mode_checkpoint_to_reject():
     matched = get_matched_graph_u_config(checkpoint)
 
     assert matched["graph_u_structure_mode"] == "reject"
+
+
+def test_matched_config_preserves_covariate_mode_and_defaults_legacy_to_confounding():
+    checkpoint = _graph_u_checkpoint()
+    checkpoint["prior_config"]["graph_u_mode"] = "covariate"
+    assert get_matched_graph_u_config(checkpoint)["graph_u_mode"] == "covariate"
+    del checkpoint["prior_config"]["graph_u_mode"]
+    assert get_matched_graph_u_config(checkpoint)["graph_u_mode"] == "confounding"
 
 
 def test_load_matched_graph_u_config_reads_checkpoint_path(tmp_path):

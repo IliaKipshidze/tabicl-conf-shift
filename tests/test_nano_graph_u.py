@@ -171,7 +171,8 @@ def test_nano_parallel_generation_is_identical_and_resume_checks_code(
         generate_dump(serial, workers=1, resume=True, **kwargs)
 
 
-def test_nano_graph_u_generation_training_and_loader_boundary(tmp_path):
+@pytest.mark.parametrize("graph_u_mode", ["confounding", "covariate"])
+def test_nano_graph_u_generation_training_and_loader_boundary(tmp_path, graph_u_mode):
     h5py = pytest.importorskip("h5py")
     pytest.importorskip("schedulefree")
     from tabicl.nano_graph_u.evaluate import evaluate_checkpoint
@@ -184,6 +185,7 @@ def test_nano_graph_u_generation_training_and_loader_boundary(tmp_path):
         graph_u_query_location=2.0,
         graph_u_query_scale=1.5,
         graph_u_force_gaussian=False,
+        graph_u_mode=graph_u_mode,
     )
     generate_dump(
         dump,
@@ -232,6 +234,7 @@ def test_nano_graph_u_generation_training_and_loader_boundary(tmp_path):
     assert payload["step"] == 2
     assert payload["prior_config"]["graph_u_query_location"] == 2.0
     assert payload["prior_config"]["graph_u_query_scale"] == 1.5
+    assert payload["prior_config"]["graph_u_mode"] == graph_u_mode
 
     uninterrupted = train_model(
         dump,

@@ -181,6 +181,8 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         graph_u_structure_mode=prior_config.get(
             "graph_u_structure_mode", _LEGACY_GRAPH_U_STRUCTURE_MODE
         ),
+        # Before modes were introduced, every Graph-U task used U -> X and U -> Y.
+        graph_u_mode=prior_config.get("graph_u_mode", "confounding"),
         graph_u_query_location=prior_config["graph_u_query_location"],
         graph_u_query_scale=prior_config["graph_u_query_scale"],
         graph_u_force_gaussian=prior_config["graph_u_force_gaussian"],
@@ -190,6 +192,7 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "prior_type": prior_type,
         "graph_u_enabled": validated.graph_u_enabled,
         "graph_u_structure_mode": validated.graph_u_structure_mode,
+        "graph_u_mode": validated.graph_u_mode,
         "graph_u_query_location": validated.graph_u_query_location,
         "graph_u_query_scale": validated.graph_u_query_scale,
         "graph_u_force_gaussian": validated.graph_u_force_gaussian,

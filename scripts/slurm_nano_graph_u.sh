@@ -10,6 +10,7 @@
 # Separate paper-scale Nano-Graph-U experiment. Does not invoke tabicl.train or
 # use its checkpoint directory. The safe default is a tiny end-to-end smoke.
 # Submit RUN_MODE=full,CONDITION=shift|identity for the 2,500-step paper recipe.
+# Set GRAPH_U_MODE=covariate for the U -> X only construction and its control.
 # Generation is CPU-only but shares this known-working GPU allocation; the GPU
 # will be idle until pre-generation finishes. Both phases resume on resubmit.
 
@@ -21,9 +22,15 @@ NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
 NANO_RUN_MODE="${RUN_MODE:-smoke}"
 NANO_CONDITION="${CONDITION:-shift}"
+NANO_GRAPH_U_MODE="${GRAPH_U_MODE:-confounding}"
 NANO_DATA_SEED="${DATA_SEED:-42}"
 NANO_MODEL_SEED="${MODEL_SEED:-42}"
 NANO_LEARNING_RATE="${LEARNING_RATE:-0.004}"
+
+case "${NANO_GRAPH_U_MODE}" in
+    confounding|covariate) ;;
+    *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
 
 case "${NANO_RUN_MODE}" in
     smoke)
@@ -81,6 +88,9 @@ NANO_SHIFT_TAG="loc_${NANO_LOCATION}_scale_${NANO_SCALE}"
 NANO_SHIFT_TAG="${NANO_SHIFT_TAG//-/m}"
 NANO_SHIFT_TAG="${NANO_SHIFT_TAG//./p}"
 NANO_RUN_TAG="${NANO_CONDITION}_${NANO_SHIFT_TAG}_${NANO_RUN_MODE}_${NANO_STEPS}steps_b${NANO_BATCH_SIZE}_r${NANO_ROWS}_f${NANO_FEATURES}"
+if [[ "${NANO_GRAPH_U_MODE}" == "covariate" ]]; then
+    NANO_RUN_TAG="covariate_${NANO_RUN_TAG}"
+fi
 NANO_DUMP="${DUMP_PATH:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/${NANO_RUN_TAG}/train.h5}"
 NANO_LEARNING_RATE_TAG="${NANO_LEARNING_RATE//-/m}"
 NANO_LEARNING_RATE_TAG="${NANO_LEARNING_RATE_TAG//+/p}"
@@ -133,7 +143,7 @@ print(f"GPU: {torch.cuda.get_device_name(0)}")
 print(f"h5py: {h5py.__version__}; schedulefree import: OK")
 PY
 
-echo "Nano mode=${NANO_RUN_MODE} condition=${NANO_CONDITION} location=${NANO_LOCATION} scale=${NANO_SCALE}"
+echo "Nano mode=${NANO_RUN_MODE} graph_u_mode=${NANO_GRAPH_U_MODE} condition=${NANO_CONDITION} location=${NANO_LOCATION} scale=${NANO_SCALE}"
 echo "Model seed=${NANO_MODEL_SEED} learning rate=${NANO_LEARNING_RATE}"
 echo "Prior dump=${NANO_DUMP}"
 echo "Checkpoint directory=${NANO_CHECKPOINT_DIR}"
@@ -144,6 +154,7 @@ NANO_GENERATE_ARGS=(
     --rows "${NANO_ROWS}" --features "${NANO_FEATURES}"
     --seed "${NANO_DATA_SEED}" --n-jobs 1 --workers "${NANO_WORKERS}"
     --query-location "${NANO_LOCATION}" --query-scale "${NANO_SCALE}"
+    --graph-u-mode "${NANO_GRAPH_U_MODE}"
 )
 if [[ -f "${NANO_DUMP}" ]]; then
     NANO_GENERATE_ARGS+=(--resume)

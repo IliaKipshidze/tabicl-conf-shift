@@ -19,10 +19,17 @@ NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
 NANO_EVAL_CHECKPOINT="${CHECKPOINT:-}"
 NANO_EVAL_CONDITION="${EVAL_CONDITION:-identity}"
+NANO_GRAPH_U_MODE="${GRAPH_U_MODE:-confounding}"
 NANO_EVAL_SEED="${EVAL_SEED:-424242}"
 NANO_EVAL_STEPS="${EVAL_STEPS:-100}"
 NANO_EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
 NANO_EVAL_WORKERS="${EVAL_WORKERS:-8}"
+
+case "${NANO_GRAPH_U_MODE}" in
+    confounding) NANO_EVAL_DIRECTORY="evaluation" ;;
+    covariate) NANO_EVAL_DIRECTORY="evaluation_covariate" ;;
+    *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
 
 if [[ -z "${NANO_EVAL_CHECKPOINT}" ]]; then
     echo "Set CHECKPOINT to a Nano-Graph-U latest.pt or step-*.pt file" >&2
@@ -51,7 +58,7 @@ fi
 NANO_EVAL_TAG="loc_${NANO_EVAL_LOCATION}_scale_${NANO_EVAL_SCALE}"
 NANO_EVAL_TAG="${NANO_EVAL_TAG//-/m}"
 NANO_EVAL_TAG="${NANO_EVAL_TAG//./p}"
-NANO_EVAL_DUMP="${EVAL_DUMP:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/evaluation/${NANO_EVAL_TAG}_seed${NANO_EVAL_SEED}_${NANO_EVAL_STEPS}steps_b${NANO_EVAL_BATCH_SIZE}/tasks.h5}"
+NANO_EVAL_DUMP="${EVAL_DUMP:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/${NANO_EVAL_DIRECTORY}/${NANO_EVAL_TAG}_seed${NANO_EVAL_SEED}_${NANO_EVAL_STEPS}steps_b${NANO_EVAL_BATCH_SIZE}/tasks.h5}"
 NANO_EVAL_RESULT="${EVAL_RESULT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/eval-${SLURM_JOB_ID}.json}"
 
 # shellcheck disable=SC1091
@@ -83,6 +90,7 @@ NANO_GENERATE_ARGS=(
     --rows 150 --features 5 --seed "${NANO_EVAL_SEED}" --n-jobs 1
     --workers "${NANO_EVAL_WORKERS}"
     --query-location "${NANO_EVAL_LOCATION}" --query-scale "${NANO_EVAL_SCALE}"
+    --graph-u-mode "${NANO_GRAPH_U_MODE}"
 )
 if [[ -f "${NANO_EVAL_DUMP}" ]]; then
     NANO_GENERATE_ARGS+=(--resume)

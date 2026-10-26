@@ -36,8 +36,18 @@ VALIDATION_STEPS = 100
 BATCH_SIZE = 32
 
 
+def _validate_graph_u_mode(mode: str) -> str:
+    if mode not in ("confounding", "covariate"):
+        raise ValueError("graph_u_mode must be confounding or covariate")
+    return mode
+
+
 def trial_spec(
-    task_id: int, data_root: str | Path, output_root: str | Path
+    task_id: int,
+    data_root: str | Path,
+    output_root: str | Path,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     """Map the 100 array tasks to five repetitions, two conditions and ten rates."""
     if (
@@ -46,6 +56,7 @@ def trial_spec(
         or not 1 <= task_id <= 100
     ):
         raise ValueError("task_id must be an integer from 1 to 100")
+    _validate_graph_u_mode(graph_u_mode)
     repetition, slot = divmod(task_id - 1, 20)
     repetition += 1
     condition = "identity" if slot < 10 else "shift"
@@ -59,7 +70,7 @@ def trial_spec(
         / condition
         / f"lr_{tag}"
     )
-    return {
+    spec = {
         "task_id": task_id,
         "repetition": repetition,
         "condition": condition,
@@ -79,11 +90,21 @@ def trial_spec(
         "checkpoint_dir": str(candidate / "checkpoints"),
         "result_path": str(candidate / "validation.json"),
     }
+    # Keep existing confounding reports reproducible and reusable unchanged.
+    if graph_u_mode != "confounding":
+        spec["graph_u_mode"] = graph_u_mode
+    return spec
 
 
 def _validate_metadata(
-    metadata: dict[str, Any], condition: str, split: str, repetition: int | None = None
+    metadata: dict[str, Any],
+    condition: str,
+    split: str,
+    repetition: int | None = None,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> int:
+    _validate_graph_u_mode(graph_u_mode)
     if condition not in ("identity", "shift") or split not in ("train", "validation"):
         raise ValueError(
             "Only identity/shift training and validation banks are accepted"
@@ -111,6 +132,7 @@ def _validate_metadata(
     }
     prior_config = PriorConfig(
         graph_u_enabled=True,
+        graph_u_mode=graph_u_mode,
         graph_u_structure_mode="add_root",
         graph_u_query_location=0.0 if condition == "identity" else 2.0,
         graph_u_query_scale=1.0 if condition == "identity" else 1.5,
@@ -122,7 +144,13 @@ def _validate_metadata(
     )
     expected["prior_config"] = asdict(prior_config)
     for key, value in expected.items():
-        if metadata.get(key) != value:
+        actual = metadata.get(key)
+        if key == "prior_config" and isinstance(actual, dict):
+            # Banks predating the mode option used the confounding construction.
+            actual = dict(
+                actual, graph_u_mode=actual.get("graph_u_mode", "confounding")
+            )
+        if actual != value:
             raise ValueError(f"Unexpected {condition} {split} bank metadata: {key}")
     fingerprint = metadata.get("generator_source_sha256")
     if not _is_digest(fingerprint):
@@ -139,11 +167,18 @@ def _is_digest(value: Any) -> bool:
 
 
 def validate_bank(
-    path: str | Path, condition: str, split: str, repetition: int | None = None
+    path: str | Path,
+    condition: str,
+    split: str,
+    repetition: int | None = None,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     """Require complete, correctly configured banks before any optimization."""
     loader = NanoPriorDumpLoader(path, batch_size=BATCH_SIZE, device="cpu")
-    steps = _validate_metadata(loader.metadata, condition, split, repetition)
+    steps = _validate_metadata(
+        loader.metadata, condition, split, repetition, graph_u_mode=graph_u_mode
+    )
     if loader.committed_steps != steps:
         raise ValueError(
             f"Incomplete {split} bank: {loader.committed_steps}/{steps} batches committed"
@@ -189,7 +224,13 @@ def validate_trial_result(
         raise ValueError(
             "Trial must score the final checkpoint on all 3,200 matching validation tasks"
         )
-    _validate_metadata(report.get("dump_metadata", {}), spec["condition"], "validation")
+    graph_u_mode = spec.get("graph_u_mode", "confounding")
+    _validate_metadata(
+        report.get("dump_metadata", {}),
+        spec["condition"],
+        "validation",
+        graph_u_mode=graph_u_mode,
+    )
     score = report.get("metrics", {}).get("roc_auc")
     if (
         isinstance(score, bool)
@@ -200,10 +241,17 @@ def validate_trial_result(
         raise ValueError("Trial has no finite validation AUROC in [0, 1]")
     if verify_files:
         train_metadata = validate_bank(
-            spec["train_dump"], spec["condition"], "train", spec["repetition"]
+            spec["train_dump"],
+            spec["condition"],
+            "train",
+            spec["repetition"],
+            graph_u_mode=graph_u_mode,
         )
         validation_metadata = validate_bank(
-            spec["validation_dump"], spec["condition"], "validation"
+            spec["validation_dump"],
+            spec["condition"],
+            "validation",
+            graph_u_mode=graph_u_mode,
         )
         if (
             train_metadata["generator_source_sha256"]
@@ -250,13 +298,23 @@ def run_trial(
     output_root: str | Path,
     *,
     device: str = "cuda",
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     """Train one candidate and score only its matching validation bank."""
-    spec = trial_spec(task_id, data_root, output_root)
+    spec = trial_spec(task_id, data_root, output_root, graph_u_mode=graph_u_mode)
     training = validate_bank(
-        spec["train_dump"], spec["condition"], "train", spec["repetition"]
+        spec["train_dump"],
+        spec["condition"],
+        "train",
+        spec["repetition"],
+        graph_u_mode=graph_u_mode,
     )
-    validation = validate_bank(spec["validation_dump"], spec["condition"], "validation")
+    validation = validate_bank(
+        spec["validation_dump"],
+        spec["condition"],
+        "validation",
+        graph_u_mode=graph_u_mode,
+    )
     if training["generator_source_sha256"] != validation["generator_source_sha256"]:
         raise ValueError(
             "Training and validation banks were generated by different code"
@@ -315,8 +373,17 @@ def main(argv: list[str] | None = None) -> None:
     trial.add_argument("--data-root", type=Path, required=True)
     trial.add_argument("--output-root", type=Path, required=True)
     trial.add_argument("--device", default="cuda")
+    trial.add_argument(
+        "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
+    )
     args = parser.parse_args(argv)
-    run_trial(args.task_id, args.data_root, args.output_root, device=args.device)
+    run_trial(
+        args.task_id,
+        args.data_root,
+        args.output_root,
+        device=args.device,
+        graph_u_mode=args.graph_u_mode,
+    )
 
 
 if __name__ == "__main__":

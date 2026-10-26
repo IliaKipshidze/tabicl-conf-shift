@@ -12,6 +12,7 @@
 # Each job trains to step 2500 and scores only its matching validation bank.
 # Preview without reading data or activating Conda: bash <this-script> --dry-run
 # Submit: sbatch scripts/slurm_nano_graph_u_tune.sh
+# Set GRAPH_U_MODE=covariate for the separate feature-only U experiment.
 
 set -euo pipefail
 
@@ -19,8 +20,14 @@ NANO_CLUSTER_ROOT="${NANO_CLUSTER_ROOT:-/home/bin/CISPA-scratch/c01ilki}"
 NANO_REPO_DIR="${NANO_REPO_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift}"
 NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
-NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions}"
-NANO_SEARCH_ROOT="${NANO_SEARCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/lr_search}"
+NANO_GRAPH_U_MODE="${GRAPH_U_MODE:-confounding}"
+case "${NANO_GRAPH_U_MODE}" in
+    confounding) NANO_MODE_SUFFIX="" ;;
+    covariate) NANO_MODE_SUFFIX="_covariate" ;;
+    *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
+NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_MODE_SUFFIX}}"
+NANO_SEARCH_ROOT="${NANO_SEARCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/lr_search${NANO_MODE_SUFFIX}}"
 NANO_TASK_ID="${SLURM_ARRAY_TASK_ID:-}"
 NANO_DRY_RUN=false
 NANO_LEARNING_RATES=(0.0001 0.0002 0.0003 0.0005 0.0007 0.001 0.0015 0.002 0.003 0.004)
@@ -57,6 +64,7 @@ configure_trial() {
         trial --task-id "${NANO_TASK_ID}"
         --data-root "${NANO_DATA_ROOT}" --output-root "${NANO_SEARCH_ROOT}"
         --device cuda
+        --graph-u-mode "${NANO_GRAPH_U_MODE}"
     )
 }
 

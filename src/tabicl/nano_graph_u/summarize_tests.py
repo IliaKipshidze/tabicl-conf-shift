@@ -26,7 +26,11 @@ def _csv_bytes(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
 
 
 def summarize_tests(
-    data_root: str | Path, search_root: str | Path, result_root: str | Path
+    data_root: str | Path,
+    search_root: str | Path,
+    result_root: str | Path,
+    *,
+    graph_u_mode: str = "confounding",
 ) -> dict[str, Any]:
     """Require the complete matched design and report mean/sample std per cell.
 
@@ -38,7 +42,8 @@ def summarize_tests(
     search_root = Path(search_root).expanduser().resolve()
     result_root = Path(result_root).expanduser().resolve()
     specs = [
-        test_spec(task, data_root, search_root, result_root) for task in range(1, 21)
+        test_spec(task, data_root, search_root, result_root, graph_u_mode=graph_u_mode)
+        for task in range(1, 21)
     ]
     missing = [
         spec["result_path"] for spec in specs if not Path(spec["result_path"]).is_file()
@@ -155,6 +160,8 @@ def summarize_tests(
         "cells": cells,
         "per_repetition": rows,
     }
+    if graph_u_mode != "confounding":
+        summary["graph_u_mode"] = graph_u_mode
     outputs = {
         result_root / "summary.json": (
             json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -179,8 +186,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--search-root", required=True)
     parser.add_argument("--result-root", required=True)
+    parser.add_argument(
+        "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
+    )
     args = parser.parse_args(argv)
-    summary = summarize_tests(args.data_root, args.search_root, args.result_root)
+    summary = summarize_tests(
+        args.data_root,
+        args.search_root,
+        args.result_root,
+        graph_u_mode=args.graph_u_mode,
+    )
     for cell in summary["cells"]:
         scores = " ".join(
             f"{metric}={cell['metrics'][metric]['mean']:.6f}+/-{cell['metrics'][metric]['std']:.6f}"

@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--query-location", type=float, default=2.0)
     generate.add_argument("--query-scale", type=float, default=1.5)
     generate.add_argument("--structure-mode", choices=("add_root",), default="add_root")
+    generate.add_argument(
+        "--graph-u-mode",
+        choices=("confounding", "covariate"),
+        default="confounding",
+        help="Inject U into X and Y (confounding), or into X only (covariate).",
+    )
     generate.add_argument("--max-attempts", type=int, default=1000)
     generate.add_argument("--force-gaussian", action="store_true")
     generate.add_argument(
@@ -64,6 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         prior_config = PriorConfig(
             graph_u_enabled=True,
             graph_u_structure_mode=args.structure_mode,
+            graph_u_mode=args.graph_u_mode,
             graph_u_query_location=args.query_location,
             graph_u_query_scale=args.query_scale,
             graph_u_force_gaussian=args.force_gaussian,

@@ -20,9 +20,10 @@ from tabicl.nano_graph_u.tune import LEARNING_RATES, trial_spec
 from tabicl.prior.graph_lib._config import PriorConfig
 
 
-def _metadata_for(condition, *, seed, steps):
+def _metadata_for(condition, *, seed, steps, graph_u_mode="confounding"):
     prior = PriorConfig(
         graph_u_enabled=True,
+        graph_u_mode=graph_u_mode,
         graph_u_structure_mode="add_root",
         graph_u_query_location=0.0 if condition == "identity" else 2.0,
         graph_u_query_scale=1.0 if condition == "identity" else 1.5,
@@ -50,17 +51,24 @@ def _metadata_for(condition, *, seed, steps):
 def make_inputs(tmp_path):
     h5py = pytest.importorskip("h5py")
 
-    def create(task_id=1, *, actual_model=False):
+    def create(task_id=1, *, actual_model=False, graph_u_mode="confounding"):
         data, search, results = (
             tmp_path / "banks",
             tmp_path / "search",
             tmp_path / "tests",
         )
-        spec = final_tests.test_spec(task_id, data, search, results)
+        spec = final_tests.test_spec(
+            task_id, data, search, results, graph_u_mode=graph_u_mode
+        )
         winners = []
         for repetition in range(1, 6):
             for offset, condition in ((0, "identity"), (10, "shift")):
-                candidate = trial_spec((repetition - 1) * 20 + offset + 1, data, search)
+                candidate = trial_spec(
+                    (repetition - 1) * 20 + offset + 1,
+                    data,
+                    search,
+                    graph_u_mode=graph_u_mode,
+                )
                 checkpoint = (
                     search / "winners" / f"rep_{repetition}" / condition / "model.pt"
                 )
@@ -83,7 +91,10 @@ def make_inputs(tmp_path):
                 }
                 if str(checkpoint) == spec["checkpoint"]:
                     metadata = _metadata_for(
-                        condition, seed=1000 + repetition, steps=2500
+                        condition,
+                        seed=1000 + repetition,
+                        steps=2500,
+                        graph_u_mode=graph_u_mode,
                     )
                     checkpoint.parent.mkdir(parents=True)
                     payload = {
@@ -125,9 +136,14 @@ def make_inputs(tmp_path):
             "learning_rates": list(LEARNING_RATES),
             "winners": winners,
         }
+        if graph_u_mode != "confounding":
+            manifest["graph_u_mode"] = graph_u_mode
         Path(spec["manifest_path"]).write_text(json.dumps(manifest), encoding="utf-8")
         test_metadata = _metadata_for(
-            spec["test_condition"], seed=2000 + spec["repetition"], steps=100
+            spec["test_condition"],
+            seed=2000 + spec["repetition"],
+            steps=100,
+            graph_u_mode=graph_u_mode,
         )
         dump = Path(spec["test_dump"])
         dump.parent.mkdir(parents=True)
@@ -301,7 +317,10 @@ def test_final_result_detects_changed_test_file_with_shared_hash_cache(make_inpu
         final_tests.validate_test_result(changed, spec, hash_cache=cache)
 
 
-def test_final_testing_actual_cpu_inference_on_all_test_tasks(make_inputs, monkeypatch):
+@pytest.mark.parametrize("graph_u_mode", ["confounding", "covariate"])
+def test_final_testing_actual_cpu_inference_on_all_test_tasks(
+    make_inputs, monkeypatch, graph_u_mode
+):
     # A small test-only architecture keeps the inference smoke fast; the
     # production checkpoint checks continue to require PAPER_MODEL_CONFIG.
     monkeypatch.setattr(
@@ -315,7 +334,7 @@ def test_final_testing_actual_cpu_inference_on_all_test_tasks(make_inputs, monke
             "num_outputs": 2,
         },
     )
-    spec, _, _ = make_inputs(actual_model=True)
+    spec, _, _ = make_inputs(actual_model=True, graph_u_mode=graph_u_mode)
     previous_threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
@@ -325,6 +344,7 @@ def test_final_testing_actual_cpu_inference_on_all_test_tasks(make_inputs, monke
             Path(spec["manifest_path"]).parents[1],
             Path(spec["result_path"]).parents[1],
             device="cpu",
+            graph_u_mode=graph_u_mode,
         )["evaluation_report"]
     finally:
         torch.set_num_threads(previous_threads)
@@ -332,3 +352,14 @@ def test_final_testing_actual_cpu_inference_on_all_test_tasks(make_inputs, monke
     assert report["query_row_count"] == 3200 * 75
     assert all(count == 3200 for count in report["metric_task_counts"].values())
     assert 0 <= report["metrics"]["roc_auc"] <= 1
+
+
+def test_covariate_winner_cannot_be_used_as_confounding_winner(make_inputs):
+    spec, manifest, metadata = make_inputs(graph_u_mode="covariate")
+    final_tests.validate_test_result(_result(spec, manifest, metadata), spec)
+    wrong_spec = dict(spec)
+    del wrong_spec["graph_u_mode"]
+    with pytest.raises(ValueError, match="different Graph-U mode"):
+        final_tests._load_winner(wrong_spec)
+    with pytest.raises(ValueError, match="prior_config"):
+        final_tests.validate_test_bank(spec["test_dump"], "identity", 1)
