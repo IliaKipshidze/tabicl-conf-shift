@@ -51,14 +51,29 @@ def _metadata_for(condition, *, seed, steps, graph_u_mode="confounding"):
 def make_inputs(tmp_path):
     h5py = pytest.importorskip("h5py")
 
-    def create(task_id=1, *, actual_model=False, graph_u_mode="confounding"):
+    def create(
+        task_id=1,
+        *,
+        actual_model=False,
+        graph_u_mode="confounding",
+        test_graph_u_mode=None,
+        legacy_confounding=False,
+    ):
         data, search, results = (
             tmp_path / "banks",
             tmp_path / "search",
             tmp_path / "tests",
         )
+        target_mode = graph_u_mode if test_graph_u_mode is None else test_graph_u_mode
+        test_data = tmp_path / "target_banks" if target_mode != graph_u_mode else data
         spec = final_tests.test_spec(
-            task_id, data, search, results, graph_u_mode=graph_u_mode
+            task_id,
+            test_data,
+            search,
+            results,
+            graph_u_mode=graph_u_mode,
+            test_graph_u_mode=test_graph_u_mode,
+            training_data_root=data if target_mode != graph_u_mode else None,
         )
         winners = []
         for repetition in range(1, 6):
@@ -96,6 +111,8 @@ def make_inputs(tmp_path):
                         steps=2500,
                         graph_u_mode=graph_u_mode,
                     )
+                    if legacy_confounding and graph_u_mode == "confounding":
+                        del metadata["prior_config"]["graph_u_mode"]
                     checkpoint.parent.mkdir(parents=True)
                     payload = {
                         "format": "nano_graph_u_v1",
@@ -143,8 +160,12 @@ def make_inputs(tmp_path):
             spec["test_condition"],
             seed=2000 + spec["repetition"],
             steps=100,
-            graph_u_mode=graph_u_mode,
+            graph_u_mode=target_mode,
         )
+        if target_mode != graph_u_mode:
+            test_metadata["generator_source_sha256"] = "e" * 64
+        if legacy_confounding and target_mode == "confounding":
+            del test_metadata["prior_config"]["graph_u_mode"]
         dump = Path(spec["test_dump"])
         dump.parent.mkdir(parents=True)
         with h5py.File(dump, "w") as stream:
@@ -180,7 +201,7 @@ def _report(spec, metadata):
 
 
 def _result(spec, manifest, metadata):
-    return {
+    result = {
         "format": final_tests.TEST_FORMAT,
         "test": spec,
         "manifest_sha256": hashlib.sha256(
@@ -193,6 +214,10 @@ def _result(spec, manifest, metadata):
         ),
         "evaluation_report": _report(spec, metadata),
     }
+    if final_tests._is_cross_mode(spec):
+        result["training_generator_source_sha256"] = manifest["generator_source_sha256"]
+        result["test_generator_source_sha256"] = metadata["generator_source_sha256"]
+    return result
 
 
 def test_final_test_mapping_crosses_both_winners_with_both_banks(tmp_path):
@@ -222,6 +247,150 @@ def test_final_test_mapping_crosses_both_winners_with_both_banks(tmp_path):
 def test_final_test_mapping_rejects_invalid_tasks(tmp_path, task):
     with pytest.raises(ValueError, match="1 to 20"):
         final_tests.test_spec(task, tmp_path, tmp_path, tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["confounding", "covariate"])
+def test_explicit_matched_modes_preserve_existing_spec_schema(tmp_path, mode):
+    original = final_tests.test_spec(1, tmp_path, tmp_path, tmp_path, graph_u_mode=mode)
+    explicit = final_tests.test_spec(
+        1,
+        tmp_path,
+        tmp_path,
+        tmp_path,
+        graph_u_mode=mode,
+        test_graph_u_mode=mode,
+        training_data_root=tmp_path,
+    )
+    assert explicit == original
+    assert "test_graph_u_mode" not in explicit
+    assert "training_data_root" not in explicit
+
+
+@pytest.mark.parametrize(
+    "training_mode,test_mode",
+    [("confounding", "covariate"), ("covariate", "confounding")],
+)
+def test_cross_mode_mapping_uses_original_model_roots_and_target_test_banks(
+    tmp_path, training_mode, test_mode
+):
+    training = tmp_path / "training"
+    testing = tmp_path / "testing"
+    search = tmp_path / "models"
+    with pytest.raises(ValueError, match="requires training_data_root"):
+        final_tests.test_spec(
+            1,
+            testing,
+            search,
+            tmp_path,
+            graph_u_mode=training_mode,
+            test_graph_u_mode=test_mode,
+        )
+    specs = [
+        final_tests.test_spec(
+            task,
+            testing,
+            search,
+            tmp_path / "results",
+            graph_u_mode=training_mode,
+            test_graph_u_mode=test_mode,
+            training_data_root=training,
+        )
+        for task in range(1, 21)
+    ]
+    assert len({spec["checkpoint"] for spec in specs}) == 10
+    assert len({spec["test_dump"] for spec in specs}) == 10
+    assert len({spec["result_path"] for spec in specs}) == 20
+    assert all(final_tests._training_data_root(spec) == training for spec in specs)
+    assert all(Path(spec["test_dump"]).is_relative_to(testing) for spec in specs)
+    assert all(Path(spec["checkpoint"]).is_relative_to(search) for spec in specs)
+    assert all(final_tests._test_mode(spec) == test_mode for spec in specs)
+
+
+@pytest.mark.parametrize(
+    "training_mode,test_mode",
+    [("confounding", "covariate"), ("covariate", "confounding")],
+)
+def test_cross_testing_reuses_fixed_assets_and_is_idempotent(
+    make_inputs, monkeypatch, training_mode, test_mode
+):
+    spec, manifest, metadata = make_inputs(
+        graph_u_mode=training_mode, test_graph_u_mode=test_mode, legacy_confounding=True
+    )
+    original_hashes = {
+        key: _sha256_file(Path(spec[key]))
+        for key in ("checkpoint", "test_dump", "manifest_path")
+    }
+    calls = []
+
+    def evaluate(checkpoint, dump, **kwargs):
+        assert checkpoint == spec["checkpoint"]
+        assert dump == spec["test_dump"]
+        calls.append("evaluate")
+        return _report(spec, metadata)
+
+    monkeypatch.setattr(final_tests, "evaluate_checkpoint", evaluate)
+    arguments = (
+        1,
+        Path(spec["test_dump"]).parents[1],
+        Path(spec["manifest_path"]).parents[1],
+        Path(spec["result_path"]).parents[1],
+    )
+    options = {
+        "device": "cpu",
+        "graph_u_mode": training_mode,
+        "test_graph_u_mode": test_mode,
+        "training_data_root": spec["training_data_root"],
+    }
+    initial = final_tests.run_test(*arguments, **options)
+    assert final_tests.run_test(*arguments, **options) == initial
+    assert calls == ["evaluate"]
+    assert (
+        initial["training_generator_source_sha256"]
+        == manifest["generator_source_sha256"]
+    )
+    assert (
+        initial["test_generator_source_sha256"] == metadata["generator_source_sha256"]
+    )
+    assert original_hashes == {
+        key: _sha256_file(Path(spec[key])) for key in original_hashes
+    }
+
+
+@pytest.mark.parametrize(
+    "field", ["training_generator_source_sha256", "test_generator_source_sha256"]
+)
+def test_cross_result_requires_both_unchanged_generator_fingerprints(
+    make_inputs, field
+):
+    spec, manifest, metadata = make_inputs(test_graph_u_mode="covariate")
+    result = _result(spec, manifest, metadata)
+    final_tests.validate_test_result(result, spec)
+    result[field] = "f" * 64
+    with pytest.raises(ValueError, match="generator"):
+        final_tests.validate_test_result(result, spec)
+
+
+def test_matched_mode_still_rejects_other_generator_before_inference(
+    make_inputs, monkeypatch
+):
+    h5py = pytest.importorskip("h5py")
+    spec, _, metadata = make_inputs()
+    metadata["generator_source_sha256"] = "e" * 64
+    with h5py.File(spec["test_dump"], "r+") as stream:
+        stream.attrs["metadata_json"] = json.dumps(metadata)
+    monkeypatch.setattr(
+        final_tests,
+        "evaluate_checkpoint",
+        lambda *a, **kw: pytest.fail("Must not evaluate"),
+    )
+    with pytest.raises(ValueError, match="different generator"):
+        final_tests.run_test(
+            1,
+            Path(spec["test_dump"]).parents[1],
+            Path(spec["manifest_path"]).parents[1],
+            Path(spec["result_path"]).parents[1],
+            device="cpu",
+        )
 
 
 @pytest.mark.parametrize("task", [2, 3])
@@ -317,9 +486,17 @@ def test_final_result_detects_changed_test_file_with_shared_hash_cache(make_inpu
         final_tests.validate_test_result(changed, spec, hash_cache=cache)
 
 
-@pytest.mark.parametrize("graph_u_mode", ["confounding", "covariate"])
+@pytest.mark.parametrize(
+    "graph_u_mode,test_graph_u_mode",
+    [
+        ("confounding", None),
+        ("covariate", None),
+        ("confounding", "covariate"),
+        ("covariate", "confounding"),
+    ],
+)
 def test_final_testing_actual_cpu_inference_on_all_test_tasks(
-    make_inputs, monkeypatch, graph_u_mode
+    make_inputs, monkeypatch, graph_u_mode, test_graph_u_mode
 ):
     # A small test-only architecture keeps the inference smoke fast; the
     # production checkpoint checks continue to require PAPER_MODEL_CONFIG.
@@ -334,24 +511,45 @@ def test_final_testing_actual_cpu_inference_on_all_test_tasks(
             "num_outputs": 2,
         },
     )
-    spec, _, _ = make_inputs(actual_model=True, graph_u_mode=graph_u_mode)
+    spec, manifest, metadata = make_inputs(
+        actual_model=True,
+        graph_u_mode=graph_u_mode,
+        test_graph_u_mode=test_graph_u_mode,
+        legacy_confounding=test_graph_u_mode is not None,
+    )
     previous_threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
-        report = final_tests.run_test(
+        result = final_tests.run_test(
             1,
             Path(spec["test_dump"]).parents[1],
             Path(spec["manifest_path"]).parents[1],
             Path(spec["result_path"]).parents[1],
             device="cpu",
             graph_u_mode=graph_u_mode,
-        )["evaluation_report"]
+            test_graph_u_mode=test_graph_u_mode,
+            training_data_root=spec.get("training_data_root"),
+        )
     finally:
         torch.set_num_threads(previous_threads)
+    report = result["evaluation_report"]
     assert report["task_count"] == 3200
     assert report["query_row_count"] == 3200 * 75
     assert all(count == 3200 for count in report["metric_task_counts"].values())
     assert 0 <= report["metrics"]["roc_auc"] <= 1
+    if final_tests._is_cross_mode(spec):
+        assert (
+            result["training_generator_source_sha256"]
+            == manifest["generator_source_sha256"]
+        )
+        assert (
+            result["test_generator_source_sha256"]
+            == metadata["generator_source_sha256"]
+        )
+        assert (
+            result["training_generator_source_sha256"]
+            != result["test_generator_source_sha256"]
+        )
 
 
 def test_covariate_winner_cannot_be_used_as_confounding_winner(make_inputs):

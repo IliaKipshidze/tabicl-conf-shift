@@ -196,3 +196,80 @@ def test_covariate_summary_preserves_mode_across_all_twenty_reports(completed_te
     assert summary["graph_u_mode"] == "covariate"
     assert len(summary["cells"]) == 4
     assert validated == list(range(1, 21))
+
+
+def cross_records(completed_tests, training_mode, test_mode):
+    data, search, output, specs, records, _ = completed_tests
+    training_data = data.parent / "training data"
+    for task, (old_spec, record) in enumerate(zip(specs, records), start=1):
+        record["test"] = summary_module.test_spec(
+            task,
+            data,
+            search,
+            output,
+            graph_u_mode=training_mode,
+            test_graph_u_mode=test_mode,
+            training_data_root=training_data,
+        )
+        record["training_generator_source_sha256"] = "b" * 64
+        record["test_generator_source_sha256"] = "c" * 64
+        rewrite(old_spec, record)
+    return training_data
+
+
+@pytest.mark.parametrize(
+    "training_mode,test_mode",
+    [("confounding", "covariate"), ("covariate", "confounding")],
+)
+def test_cross_summary_preserves_both_constructions_and_generator_versions(
+    completed_tests, training_mode, test_mode
+):
+    data, search, output, _, _, validated = completed_tests
+    training_data = cross_records(completed_tests, training_mode, test_mode)
+    kwargs = {
+        "graph_u_mode": training_mode,
+        "test_graph_u_mode": test_mode,
+        "training_data_root": training_data,
+    }
+    summary = summary_module.summarize_tests(data, search, output, **kwargs)
+    assert validated == list(range(1, 21))
+    assert summary["training_data_root"] == str(training_data.resolve())
+    assert summary["training_generator_source_sha256"] == "b" * 64
+    assert summary["test_generator_source_sha256"] == "c" * 64
+    for row in [summary, *summary["cells"], *summary["per_repetition"]]:
+        assert row["training_graph_u_mode"] == training_mode
+        assert row["test_graph_u_mode"] == test_mode
+    with (output / "summary.csv").open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 4
+    assert {row["training_graph_u_mode"] for row in rows} == {training_mode}
+    assert {row["test_graph_u_mode"] for row in rows} == {test_mode}
+    assert all(
+        float(row["accuracy_std"]) == pytest.approx(0.01 * math.sqrt(2.5))
+        for row in rows
+    )
+    before = {path.name: path.read_bytes() for path in output.glob("summary.*")}
+    assert summary_module.summarize_tests(data, search, output, **kwargs) == summary
+    assert before == {path.name: path.read_bytes() for path in output.glob("summary.*")}
+
+
+@pytest.mark.parametrize(
+    "fingerprint", ["training_generator_source_sha256", "test_generator_source_sha256"]
+)
+def test_cross_summary_rejects_inconsistent_generator_versions(
+    completed_tests, fingerprint
+):
+    data, search, output, specs, records, _ = completed_tests
+    training_data = cross_records(completed_tests, "confounding", "covariate")
+    records[7][fingerprint] = "d" * 64
+    rewrite(specs[7], records[7])
+    with pytest.raises(ValueError, match="inconsistent generator versions"):
+        summary_module.summarize_tests(
+            data,
+            search,
+            output,
+            graph_u_mode="confounding",
+            test_graph_u_mode="covariate",
+            training_data_root=training_data,
+        )
+    assert not (output / "summary.csv").exists()

@@ -47,7 +47,13 @@ def shell_path(path: Path) -> str:
 @pytest.fixture
 def job_env(tmp_path):
     env = dict(os.environ)
-    for key in ("SLURM_ARRAY_TASK_ID", "WORKERS", "GRAPH_U_MODE"):
+    for key in (
+        "SLURM_ARRAY_TASK_ID",
+        "WORKERS",
+        "GRAPH_U_MODE",
+        "TEST_GRAPH_U_MODE",
+        "NANO_TRAIN_DATA_ROOT",
+    ):
         env.pop(key, None)
     env.update(
         NANO_CLUSTER_ROOT=shell_path(tmp_path),
@@ -419,4 +425,88 @@ def test_unknown_graph_u_mode_fails_before_writes(bash, job_env, tmp_path, scrip
     result = run_script(bash, job_env, "--dry-run", script=script)
     assert result.returncode != 0
     assert "GRAPH_U_MODE must be" in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "training_mode,test_mode",
+    [("confounding", "covariate"), ("covariate", "confounding")],
+)
+def test_cross_evaluation_plans_match_model_and_bank_roots(
+    bash, job_env, tmp_path, training_mode, test_mode
+):
+    from tabicl.nano_graph_u.test_winners import test_spec as make_spec
+
+    job_env.update(GRAPH_U_MODE=training_mode, TEST_GRAPH_U_MODE=test_mode)
+    for name in ("NANO_DATA_ROOT", "NANO_SEARCH_ROOT", "NANO_TEST_ROOT"):
+        job_env.pop(name)
+    result = run_script(bash, job_env, "--dry-run", script=TEST_SCRIPT)
+    assert result.returncode == 0, result.stderr
+    commands = [
+        shlex.split(line.removeprefix("Command:"))
+        for line in result.stdout.splitlines()
+        if line.startswith("Command:")
+    ]
+    model_suffix = "_covariate" if training_mode == "covariate" else ""
+    bank_suffix = "_covariate" if test_mode == "covariate" else ""
+    for task, command in enumerate(commands, start=1):
+        options = dict(zip(command[4::2], command[5::2]))
+        assert options["--graph-u-mode"] == training_mode
+        assert options["--test-graph-u-mode"] == test_mode
+        assert options["--data-root"].endswith(f"/repetitions{bank_suffix}")
+        assert options["--training-data-root"].endswith(f"/repetitions{model_suffix}")
+        assert options["--search-root"].endswith(f"/lr_search{model_suffix}")
+        assert options["--result-root"].endswith(
+            f"/lr_search_tests_{training_mode}_on_{test_mode}"
+        )
+        spec = make_spec(
+            task,
+            options["--data-root"],
+            options["--search-root"],
+            options["--result-root"],
+            graph_u_mode=training_mode,
+            test_graph_u_mode=test_mode,
+            training_data_root=options["--training-data-root"],
+        )
+        assert spec["repetition"] == (task - 1) // 4 + 1
+        assert (
+            f"/rep_{spec['repetition']}/{spec['training_condition']}/model.pt"
+            in spec["checkpoint"].replace("\\", "/")
+        )
+    assert len(commands) == 20
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("script", [TEST_SCRIPT, SUMMARY_SCRIPT])
+@pytest.mark.parametrize(
+    "training_mode,test_mode",
+    [("confounding", "covariate"), ("covariate", "confounding")],
+)
+def test_cross_scripts_propagate_both_modes_and_training_root(
+    bash, job_env, tmp_path, mock_conda, script, training_mode, test_mode
+):
+    job_env.update(
+        GRAPH_U_MODE=training_mode,
+        TEST_GRAPH_U_MODE=test_mode,
+        SLURM_ARRAY_TASK_ID="1",
+        NANO_TRAIN_DATA_ROOT=shell_path(tmp_path / "original training banks"),
+    )
+    result = run_script(bash, job_env, script=script)
+    assert result.returncode == 0, result.stderr
+    arguments = (tmp_path / "arguments.txt").read_text().splitlines()
+    assert arguments[arguments.index("--graph-u-mode") + 1] == training_mode
+    assert arguments[arguments.index("--test-graph-u-mode") + 1] == test_mode
+    assert (
+        arguments[arguments.index("--training-data-root") + 1]
+        == job_env["NANO_TRAIN_DATA_ROOT"]
+    )
+    assert "generate" not in arguments and "train" not in arguments
+
+
+@pytest.mark.parametrize("script", [TEST_SCRIPT, SUMMARY_SCRIPT])
+def test_unknown_test_graph_u_mode_fails_before_writes(bash, job_env, tmp_path, script):
+    job_env["TEST_GRAPH_U_MODE"] = "invalid"
+    result = run_script(bash, job_env, script=script)
+    assert result.returncode != 0
+    assert "TEST_GRAPH_U_MODE must be" in result.stderr
     assert not list(tmp_path.iterdir())

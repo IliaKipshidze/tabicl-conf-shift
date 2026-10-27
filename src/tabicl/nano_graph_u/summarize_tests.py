@@ -31,6 +31,8 @@ def summarize_tests(
     result_root: str | Path,
     *,
     graph_u_mode: str = "confounding",
+    test_graph_u_mode: str | None = None,
+    training_data_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Require the complete matched design and report mean/sample std per cell.
 
@@ -41,8 +43,23 @@ def summarize_tests(
     data_root = Path(data_root).expanduser().resolve()
     search_root = Path(search_root).expanduser().resolve()
     result_root = Path(result_root).expanduser().resolve()
+    test_mode = graph_u_mode if test_graph_u_mode is None else test_graph_u_mode
+    cross_mode = test_mode != graph_u_mode
+    mode_columns = (
+        {"training_graph_u_mode": graph_u_mode, "test_graph_u_mode": test_mode}
+        if cross_mode
+        else {}
+    )
     specs = [
-        test_spec(task, data_root, search_root, result_root, graph_u_mode=graph_u_mode)
+        test_spec(
+            task,
+            data_root,
+            search_root,
+            result_root,
+            graph_u_mode=graph_u_mode,
+            test_graph_u_mode=test_graph_u_mode,
+            training_data_root=training_data_root,
+        )
         for task in range(1, 21)
     ]
     missing = [
@@ -59,6 +76,7 @@ def summarize_tests(
     checkpoint_hashes: dict[tuple[int, str], str] = {}
     test_hashes: dict[tuple[int, str], str] = {}
     manifest_hash = None
+    generator_fingerprints: dict[str, str] = {}
     for spec in specs:
         result = json.loads(Path(spec["result_path"]).read_text(encoding="utf-8"))
         validate_test_result(result, spec, verify_files=True, hash_cache=hash_cache)
@@ -84,8 +102,18 @@ def summarize_tests(
         ):
             raise ValueError("The two models were evaluated on different test banks")
         winner = result["winner"]
+        if cross_mode:
+            for key in (
+                "training_generator_source_sha256",
+                "test_generator_source_sha256",
+            ):
+                if generator_fingerprints.setdefault(key, result[key]) != result[key]:
+                    raise ValueError(
+                        "Cross-mode reports use inconsistent generator versions"
+                    )
         rows.append(
             {
+                **mode_columns,
                 "repetition": repetition,
                 "training_condition": training_condition,
                 "test_condition": test_condition,
@@ -100,6 +128,11 @@ def summarize_tests(
                 "test_dump": report["dump"],
                 "test_dump_sha256": report["dump_sha256"],
                 "result_path": spec["result_path"],
+                **(
+                    {key: result[key] for key in generator_fingerprints}
+                    if cross_mode
+                    else {}
+                ),
             }
         )
 
@@ -124,6 +157,7 @@ def summarize_tests(
                 for metric in METRICS
             }
             cell = {
+                **mode_columns,
                 "training_condition": training_condition,
                 "test_condition": test_condition,
                 "repetition_count": 5,
@@ -134,6 +168,7 @@ def summarize_tests(
                 {
                     key: cell[key]
                     for key in (
+                        *mode_columns,
                         "training_condition",
                         "test_condition",
                         "repetition_count",
@@ -162,13 +197,19 @@ def summarize_tests(
     }
     if graph_u_mode != "confounding":
         summary["graph_u_mode"] = graph_u_mode
+    if cross_mode:
+        summary.update(
+            mode_columns,
+            training_data_root=specs[0]["training_data_root"],
+            **generator_fingerprints,
+        )
     outputs = {
         result_root / "summary.json": (
             json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n"
         ).encode("utf-8"),
         result_root / "summary.csv": _csv_bytes(
             csv_rows,
-            ["training_condition", "test_condition", "repetition_count"]
+            [*mode_columns, "training_condition", "test_condition", "repetition_count"]
             + [f"{metric}_{stat}" for metric in METRICS for stat in ("mean", "std")],
         ),
         result_root / "per_repetition.csv": _csv_bytes(rows, list(rows[0])),
@@ -189,18 +230,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
     )
+    parser.add_argument("--test-graph-u-mode", choices=("confounding", "covariate"))
+    parser.add_argument("--training-data-root")
     args = parser.parse_args(argv)
     summary = summarize_tests(
         args.data_root,
         args.search_root,
         args.result_root,
         graph_u_mode=args.graph_u_mode,
+        test_graph_u_mode=args.test_graph_u_mode,
+        training_data_root=args.training_data_root,
     )
     for cell in summary["cells"]:
         scores = " ".join(
             f"{metric}={cell['metrics'][metric]['mean']:.6f}+/-{cell['metrics'][metric]['std']:.6f}"
             for metric in METRICS
         )
+        if "training_graph_u_mode" in cell:
+            print(
+                f"model_construction={cell['training_graph_u_mode']} "
+                f"test_construction={cell['test_graph_u_mode']}",
+                flush=True,
+            )
         print(
             f"training={cell['training_condition']} test={cell['test_condition']} "
             f"n=5 {scores}",

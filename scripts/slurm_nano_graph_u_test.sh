@@ -12,7 +12,8 @@
 # data generation, or winner selection. Four tasks per repetition:
 # identity->identity, identity->shift, shift->identity, shift->shift.
 # Submit: sbatch scripts/slurm_nano_graph_u_test.sh
-# Use the same GRAPH_U_MODE as generation and tuning.
+# GRAPH_U_MODE selects the models; TEST_GRAPH_U_MODE selects the test banks
+# and defaults to the model mode. Cross-mode results use separate directories.
 # Preview all tasks: bash scripts/slurm_nano_graph_u_test.sh --dry-run
 
 set -euo pipefail
@@ -27,9 +28,20 @@ case "${NANO_GRAPH_U_MODE}" in
     covariate) NANO_MODE_SUFFIX="_covariate" ;;
     *) echo "GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
 esac
-NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_MODE_SUFFIX}}"
+NANO_TEST_GRAPH_U_MODE="${TEST_GRAPH_U_MODE:-${NANO_GRAPH_U_MODE}}"
+case "${NANO_TEST_GRAPH_U_MODE}" in
+    confounding) NANO_TEST_MODE_SUFFIX="" ;;
+    covariate) NANO_TEST_MODE_SUFFIX="_covariate" ;;
+    *) echo "TEST_GRAPH_U_MODE must be confounding or covariate" >&2; exit 1 ;;
+esac
+NANO_TRAIN_DATA_ROOT="${NANO_TRAIN_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_MODE_SUFFIX}}"
+NANO_DATA_ROOT="${NANO_DATA_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-priors/nano_graph_u/repetitions${NANO_TEST_MODE_SUFFIX}}"
 NANO_SEARCH_ROOT="${NANO_SEARCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-checkpoints/nano_graph_u/lr_search${NANO_MODE_SUFFIX}}"
-NANO_TEST_ROOT="${NANO_TEST_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/lr_search_tests${NANO_MODE_SUFFIX}}"
+NANO_RESULT_SUFFIX="${NANO_MODE_SUFFIX}"
+if [[ "${NANO_GRAPH_U_MODE}" != "${NANO_TEST_GRAPH_U_MODE}" ]]; then
+    NANO_RESULT_SUFFIX="_${NANO_GRAPH_U_MODE}_on_${NANO_TEST_GRAPH_U_MODE}"
+fi
+NANO_TEST_ROOT="${NANO_TEST_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-evaluations/nano_graph_u/lr_search_tests${NANO_RESULT_SUFFIX}}"
 NANO_TASK_ID="${SLURM_ARRAY_TASK_ID:-}"
 NANO_DRY_RUN=false
 
@@ -39,8 +51,8 @@ elif [[ "$#" != 0 ]]; then
     echo "Usage: $0 [--dry-run]" >&2
     exit 1
 fi
-if [[ "${NANO_DATA_ROOT}" != /* || "${NANO_SEARCH_ROOT}" != /* || "${NANO_TEST_ROOT}" != /* ]]; then
-    echo "NANO_DATA_ROOT, NANO_SEARCH_ROOT and NANO_TEST_ROOT must be absolute paths" >&2
+if [[ "${NANO_DATA_ROOT}" != /* || "${NANO_SEARCH_ROOT}" != /* || "${NANO_TEST_ROOT}" != /* || "${NANO_TRAIN_DATA_ROOT}" != /* ]]; then
+    echo "NANO_DATA_ROOT, NANO_SEARCH_ROOT, NANO_TEST_ROOT and NANO_TRAIN_DATA_ROOT must be absolute paths" >&2
     exit 1
 fi
 
@@ -72,10 +84,17 @@ configure_test() {
         --result-root "${NANO_TEST_ROOT}" --device cuda
         --graph-u-mode "${NANO_GRAPH_U_MODE}"
     )
+    if [[ "${NANO_GRAPH_U_MODE}" != "${NANO_TEST_GRAPH_U_MODE}" ]]; then
+        NANO_TEST_ARGS+=(
+            --test-graph-u-mode "${NANO_TEST_GRAPH_U_MODE}"
+            --training-data-root "${NANO_TRAIN_DATA_ROOT}"
+        )
+    fi
 }
 
 print_plan() {
     echo "test=${NANO_TASK_ID} repetition=${NANO_REPETITION} training=${NANO_TRAIN_CONDITION} evaluation=${NANO_TEST_CONDITION} test_seed=${NANO_TEST_SEED} tables=3200"
+    echo "Model construction=${NANO_GRAPH_U_MODE}; test construction=${NANO_TEST_GRAPH_U_MODE}"
     echo "Checkpoint=${NANO_CHECKPOINT}"
     echo "Test bank=${NANO_DUMP}"
     echo "Result=${NANO_RESULT}"

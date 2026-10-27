@@ -32,6 +32,18 @@ TEST_STEPS = 100
 METRIC_NAMES = ("accuracy", "balanced_accuracy", "macro_f1", "roc_auc", "nll", "brier")
 
 
+def _test_mode(spec: dict[str, Any]) -> str:
+    return spec.get("test_graph_u_mode", spec.get("graph_u_mode", "confounding"))
+
+
+def _is_cross_mode(spec: dict[str, Any]) -> bool:
+    return _test_mode(spec) != spec.get("graph_u_mode", "confounding")
+
+
+def _training_data_root(spec: dict[str, Any]) -> Path:
+    return Path(spec.get("training_data_root", Path(spec["test_dump"]).parents[1]))
+
+
 def test_spec(
     task_id: int,
     data_root: str | Path,
@@ -39,8 +51,10 @@ def test_spec(
     result_root: str | Path,
     *,
     graph_u_mode: str = "confounding",
+    test_graph_u_mode: str | None = None,
+    training_data_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Map each repetition to identity/shift winners crossed with both test banks."""
+    """Map each repetition to both winners and banks, optionally across constructions."""
     if (
         isinstance(task_id, bool)
         or not isinstance(task_id, int)
@@ -48,6 +62,10 @@ def test_spec(
     ):
         raise ValueError("task_id must be an integer from 1 to 20")
     _validate_graph_u_mode(graph_u_mode)
+    target_mode = graph_u_mode if test_graph_u_mode is None else test_graph_u_mode
+    _validate_graph_u_mode(target_mode)
+    if target_mode != graph_u_mode and training_data_root is None:
+        raise ValueError("Cross-construction testing requires training_data_root")
     repetition, slot = divmod(task_id - 1, 4)
     repetition += 1
     training_condition = "identity" if slot < 2 else "shift"
@@ -82,6 +100,18 @@ def test_spec(
     }
     if graph_u_mode != "confounding":
         spec["graph_u_mode"] = graph_u_mode
+    if target_mode != graph_u_mode:
+        spec["test_graph_u_mode"] = target_mode
+        spec["training_data_root"] = str(
+            Path(training_data_root).expanduser().resolve()
+        )
+    elif (
+        training_data_root is not None
+        and Path(training_data_root).expanduser().resolve() != data_root
+    ):
+        raise ValueError(
+            "Matched testing requires the same training and test data root"
+        )
     return spec
 
 
@@ -121,7 +151,7 @@ def validate_test_bank(
 def _validate_winner_entry(
     winner: dict[str, Any], spec: dict[str, Any]
 ) -> dict[str, Any]:
-    data_root = Path(spec["test_dump"]).parents[1]
+    data_root = _training_data_root(spec)
     search_root = Path(spec["manifest_path"]).parents[1]
     candidate = trial_spec(
         winner.get("task_id"),
@@ -173,7 +203,7 @@ def _load_winner(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], 
         raise ValueError("Winner manifest uses a different Graph-U mode")
     expected = {
         "format": WINNERS_FORMAT,
-        "data_root": str(Path(spec["test_dump"]).parents[1]),
+        "data_root": str(_training_data_root(spec)),
         "output_root": str(Path(spec["manifest_path"]).parents[1]),
         "selection_metric": "roc_auc",
         "validation_policy": "matching_training_condition",
@@ -292,8 +322,14 @@ def validate_test_result(
         report.get("dump_metadata", {}),
         spec["test_condition"],
         spec["repetition"],
-        graph_u_mode=spec.get("graph_u_mode", "confounding"),
+        graph_u_mode=_test_mode(spec),
     )
+    if _is_cross_mode(spec) and (
+        not _is_digest(result.get("training_generator_source_sha256"))
+        or result.get("test_generator_source_sha256")
+        != report["dump_metadata"]["generator_source_sha256"]
+    ):
+        raise ValueError("Cross-construction result has invalid generator provenance")
     for name in METRIC_NAMES:
         value = report.get("metrics", {}).get(name)
         if (
@@ -313,15 +349,26 @@ def validate_test_result(
             spec["test_dump"],
             spec["test_condition"],
             spec["repetition"],
-            graph_u_mode=spec.get("graph_u_mode", "confounding"),
+            graph_u_mode=_test_mode(spec),
         )
         if (
             report["dump_metadata"] != metadata
-            or metadata["generator_source_sha256"]
-            != manifest["generator_source_sha256"]
+            or (
+                not _is_cross_mode(spec)
+                and metadata["generator_source_sha256"]
+                != manifest["generator_source_sha256"]
+            )
             or report["dump_sha256"] != _digest(Path(spec["test_dump"]), hash_cache)
         ):
             raise ValueError("Test bank changed or uses a different generator")
+        if (
+            _is_cross_mode(spec)
+            and result["training_generator_source_sha256"]
+            != manifest["generator_source_sha256"]
+        ):
+            raise ValueError(
+                "Cross-construction training generator differs from the winner selection"
+            )
         _validate_checkpoint(
             selected, spec, manifest["generator_source_sha256"], hash_cache
         )
@@ -335,18 +382,29 @@ def run_test(
     *,
     device: str = "cuda",
     graph_u_mode: str = "confounding",
+    test_graph_u_mode: str | None = None,
+    training_data_root: str | Path | None = None,
 ) -> dict[str, Any]:
     spec = test_spec(
-        task_id, data_root, search_root, result_root, graph_u_mode=graph_u_mode
+        task_id,
+        data_root,
+        search_root,
+        result_root,
+        graph_u_mode=graph_u_mode,
+        test_graph_u_mode=test_graph_u_mode,
+        training_data_root=training_data_root,
     )
     manifest, winner, manifest_hash = _load_winner(spec)
     metadata = validate_test_bank(
         spec["test_dump"],
         spec["test_condition"],
         spec["repetition"],
-        graph_u_mode=graph_u_mode,
+        graph_u_mode=_test_mode(spec),
     )
-    if metadata["generator_source_sha256"] != manifest["generator_source_sha256"]:
+    if (
+        not _is_cross_mode(spec)
+        and metadata["generator_source_sha256"] != manifest["generator_source_sha256"]
+    ):
         raise ValueError(
             "Test bank uses a different generator from the selected models"
         )
@@ -367,6 +425,9 @@ def run_test(
         "winner": winner,
         "evaluation_report": report,
     }
+    if _is_cross_mode(spec):
+        result["training_generator_source_sha256"] = manifest["generator_source_sha256"]
+        result["test_generator_source_sha256"] = metadata["generator_source_sha256"]
     validate_test_result(result, spec)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -393,7 +454,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--result-root", required=True, type=Path)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
-        "--graph-u-mode", choices=("confounding", "covariate"), default="confounding"
+        "--graph-u-mode",
+        choices=("confounding", "covariate"),
+        default="confounding",
+        help="Construction used for the selected models' training banks.",
+    )
+    parser.add_argument(
+        "--test-graph-u-mode",
+        choices=("confounding", "covariate"),
+        help="Test-bank construction; defaults to the training construction.",
+    )
+    parser.add_argument(
+        "--training-data-root",
+        type=Path,
+        help="Original training-bank root; required when testing across constructions.",
     )
     args = parser.parse_args(argv)
     run_test(
@@ -403,6 +477,8 @@ def main(argv: list[str] | None = None) -> None:
         args.result_root,
         device=args.device,
         graph_u_mode=args.graph_u_mode,
+        test_graph_u_mode=args.test_graph_u_mode,
+        training_data_root=args.training_data_root,
     )
 
 
