@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
 
 CHECKPOINT_METADATA_VERSION = 1
 _GRAPH_U_KEYS = (
@@ -174,6 +174,18 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "Graph-U shift. Supply an evaluation condition explicitly."
         )
 
+    sampling_config = {
+        key: prior_config.get(key, default)
+        for key, default in GRAPH_U_SAMPLING_DEFAULTS.items()
+    }
+    if sampling_config["graph_u_shift_mode"] == "sampled":
+        missing = [key for key in GRAPH_U_SAMPLING_DEFAULTS if key not in prior_config]
+        if missing:
+            raise ValueError(
+                "Sampled Graph-U checkpoint is missing distribution fields: "
+                + ", ".join(missing)
+            )
+
     validated = PriorConfig(
         graph_u_enabled=True,
         # Every Graph-U checkpoint written before structure modes were introduced
@@ -187,8 +199,9 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         graph_u_query_scale=prior_config["graph_u_query_scale"],
         graph_u_force_gaussian=prior_config["graph_u_force_gaussian"],
         graph_u_max_attempts=prior_config["graph_u_max_attempts"],
+        **sampling_config,
     )
-    return {
+    matched = {
         "prior_type": prior_type,
         "graph_u_enabled": validated.graph_u_enabled,
         "graph_u_structure_mode": validated.graph_u_structure_mode,
@@ -198,6 +211,10 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "graph_u_force_gaussian": validated.graph_u_force_gaussian,
         "graph_u_max_attempts": validated.graph_u_max_attempts,
     }
+    # Preserve the historical fixed-shift representation for existing callers.
+    if validated.graph_u_shift_mode == "sampled":
+        matched.update({key: getattr(validated, key) for key in GRAPH_U_SAMPLING_DEFAULTS})
+    return matched
 
 
 def load_matched_graph_u_config(

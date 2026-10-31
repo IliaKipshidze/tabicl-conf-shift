@@ -13,7 +13,7 @@ import torch
 from tabicl.nano_graph_u import tune
 from tabicl.nano_graph_u.data import _metadata
 from tabicl.nano_graph_u.train import PAPER_MODEL_CONFIG, _sha256_file
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
 
 
 def _prior(condition, graph_u_mode="confounding"):
@@ -344,4 +344,36 @@ def test_legacy_metadata_missing_mode_remains_confounding_without_mutation():
     with pytest.raises(ValueError, match="prior_config"):
         tune._validate_metadata(
             metadata, "identity", "validation", graph_u_mode="covariate"
+        )
+
+
+@pytest.mark.parametrize("condition", ["identity", "shift"])
+@pytest.mark.parametrize("mode", ["confounding", "covariate"])
+@pytest.mark.parametrize("split", ["train", "validation"])
+def test_legacy_banks_without_sampling_fields_remain_valid(condition, mode, split):
+    steps, seed = (2500, 1001) if split == "train" else (100, 3001)
+    metadata = _metadata(
+        _prior(condition, mode),
+        steps=steps,
+        batch_size=32,
+        seed=seed,
+        rows=150,
+        features=5,
+        min_train_size=0.3,
+        max_train_size=0.9,
+        n_jobs=1,
+    )
+    for key in GRAPH_U_SAMPLING_DEFAULTS:
+        del metadata["prior_config"][key]
+    before = copy.deepcopy(metadata)
+    repetition = 1 if split == "train" else None
+    assert tune._validate_metadata(
+        metadata, condition, split, repetition, graph_u_mode=mode
+    ) == steps
+    assert metadata == before
+
+    metadata["prior_config"]["graph_u_shift_mode"] = "sampled"
+    with pytest.raises(ValueError, match="prior_config"):
+        tune._validate_metadata(
+            metadata, condition, split, repetition, graph_u_mode=mode
         )

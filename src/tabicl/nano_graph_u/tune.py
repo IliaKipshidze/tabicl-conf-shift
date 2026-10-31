@@ -12,8 +12,9 @@ from typing import Any
 
 import torch
 
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS
 
+from ._settings import experiment_prior_config, normalize_sampling_config
 from .data import _SEED_SCHEME, NanoPriorDumpLoader
 from .evaluate import evaluate_checkpoint
 from .train import PAPER_MODEL_CONFIG, _sha256_file, train_model
@@ -48,6 +49,7 @@ def trial_spec(
     output_root: str | Path,
     *,
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map the 100 array tasks to five repetitions, two conditions and ten rates."""
     if (
@@ -93,6 +95,8 @@ def trial_spec(
     # Keep existing confounding reports reproducible and reusable unchanged.
     if graph_u_mode != "confounding":
         spec["graph_u_mode"] = graph_u_mode
+    if sampling_config is not None:
+        spec["sampling_config"] = normalize_sampling_config(sampling_config)
     return spec
 
 
@@ -103,6 +107,7 @@ def _validate_metadata(
     repetition: int | None = None,
     *,
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> int:
     _validate_graph_u_mode(graph_u_mode)
     if condition not in ("identity", "shift") or split not in ("train", "validation"):
@@ -130,18 +135,7 @@ def _validate_metadata(
         "n_jobs": 1,
         "max_step_retries": 8,
     }
-    prior_config = PriorConfig(
-        graph_u_enabled=True,
-        graph_u_mode=graph_u_mode,
-        graph_u_structure_mode="add_root",
-        graph_u_query_location=0.0 if condition == "identity" else 2.0,
-        graph_u_query_scale=1.0 if condition == "identity" else 1.5,
-        graph_u_force_gaussian=False,
-        graph_u_max_attempts=1000,
-        filter_unpredictable_graphs=True,
-        filter_unpredictable_datasets=True,
-        allow_act_warping=False,
-    )
+    prior_config = experiment_prior_config(condition, graph_u_mode, sampling_config)
     expected["prior_config"] = asdict(prior_config)
     for key, value in expected.items():
         actual = metadata.get(key)
@@ -150,6 +144,12 @@ def _validate_metadata(
             actual = dict(
                 actual, graph_u_mode=actual.get("graph_u_mode", "confounding")
             )
+            # Older banks predate configurable shift distributions and always
+            # used fixed values. Normalize a copy for comparison only; stored
+            # provenance, checkpoint hashes and reports remain unchanged.
+            if actual.get("graph_u_shift_mode", "fixed") == "fixed":
+                for field, default in GRAPH_U_SAMPLING_DEFAULTS.items():
+                    actual.setdefault(field, default)
         if actual != value:
             raise ValueError(f"Unexpected {condition} {split} bank metadata: {key}")
     fingerprint = metadata.get("generator_source_sha256")
@@ -173,11 +173,13 @@ def validate_bank(
     repetition: int | None = None,
     *,
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require complete, correctly configured banks before any optimization."""
     loader = NanoPriorDumpLoader(path, batch_size=BATCH_SIZE, device="cpu")
     steps = _validate_metadata(
-        loader.metadata, condition, split, repetition, graph_u_mode=graph_u_mode
+        loader.metadata, condition, split, repetition, graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
     )
     if loader.committed_steps != steps:
         raise ValueError(
@@ -225,11 +227,13 @@ def validate_trial_result(
             "Trial must score the final checkpoint on all 3,200 matching validation tasks"
         )
     graph_u_mode = spec.get("graph_u_mode", "confounding")
+    sampling_config = spec.get("sampling_config")
     _validate_metadata(
         report.get("dump_metadata", {}),
         spec["condition"],
         "validation",
         graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
     )
     score = report.get("metrics", {}).get("roc_auc")
     if (
@@ -246,12 +250,14 @@ def validate_trial_result(
             "train",
             spec["repetition"],
             graph_u_mode=graph_u_mode,
+            sampling_config=sampling_config,
         )
         validation_metadata = validate_bank(
             spec["validation_dump"],
             spec["condition"],
             "validation",
             graph_u_mode=graph_u_mode,
+            sampling_config=sampling_config,
         )
         if (
             train_metadata["generator_source_sha256"]
@@ -299,21 +305,27 @@ def run_trial(
     *,
     device: str = "cuda",
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Train one candidate and score only its matching validation bank."""
-    spec = trial_spec(task_id, data_root, output_root, graph_u_mode=graph_u_mode)
+    spec = trial_spec(
+        task_id, data_root, output_root, graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
+    )
     training = validate_bank(
         spec["train_dump"],
         spec["condition"],
         "train",
         spec["repetition"],
         graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
     )
     validation = validate_bank(
         spec["validation_dump"],
         spec["condition"],
         "validation",
         graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
     )
     if training["generator_source_sha256"] != validation["generator_source_sha256"]:
         raise ValueError(

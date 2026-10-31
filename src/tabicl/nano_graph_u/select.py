@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ._settings import normalize_sampling_config
 from .train import _sha256_file
 from .tune import LEARNING_RATES, trial_spec, validate_trial_result
 
@@ -64,7 +65,8 @@ def _retain_checkpoint(source: Path, destination: Path, expected_hash: str) -> N
 
 
 def select_winners(
-    data_root: str | Path, output_root: str | Path, *, graph_u_mode: str = "confounding"
+    data_root: str | Path, output_root: str | Path, *, graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate all 100 trials, then retain one winner per repetition/condition.
 
@@ -75,7 +77,10 @@ def select_winners(
     data_root = Path(data_root).expanduser().resolve()
     output_root = Path(output_root).expanduser().resolve()
     specs = [
-        trial_spec(task_id, data_root, output_root, graph_u_mode=graph_u_mode)
+        trial_spec(
+            task_id, data_root, output_root, graph_u_mode=graph_u_mode,
+            sampling_config=sampling_config,
+        )
         for task_id in range(1, 101)
     ]
     missing = [
@@ -157,6 +162,8 @@ def select_winners(
     }
     if graph_u_mode != "confounding":
         manifest["graph_u_mode"] = graph_u_mode
+    if sampling_config is not None:
+        manifest["sampling_config"] = normalize_sampling_config(sampling_config)
     manifest_bytes = (
         json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode()

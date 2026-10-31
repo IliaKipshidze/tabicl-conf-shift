@@ -11,6 +11,7 @@ from statistics import mean, stdev
 from typing import Any
 
 from .select import _atomic_write, _check_existing
+from ._settings import normalize_sampling_config
 from .test_winners import METRIC_NAMES as METRICS
 from .test_winners import test_spec, validate_test_result
 
@@ -33,6 +34,7 @@ def summarize_tests(
     graph_u_mode: str = "confounding",
     test_graph_u_mode: str | None = None,
     training_data_root: str | Path | None = None,
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require the complete matched design and report mean/sample std per cell.
 
@@ -59,6 +61,7 @@ def summarize_tests(
             graph_u_mode=graph_u_mode,
             test_graph_u_mode=test_graph_u_mode,
             training_data_root=training_data_root,
+            sampling_config=sampling_config,
         )
         for task in range(1, 21)
     ]
@@ -195,6 +198,8 @@ def summarize_tests(
         "cells": cells,
         "per_repetition": rows,
     }
+    if sampling_config is not None:
+        summary["sampling_config"] = normalize_sampling_config(sampling_config)
     if graph_u_mode != "confounding":
         summary["graph_u_mode"] = graph_u_mode
     if cross_mode:

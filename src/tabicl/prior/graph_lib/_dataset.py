@@ -314,6 +314,19 @@ class RandomDataset(PriorComponent):
         graph_u_config = {
             name: value for name, value in vars(self.config).items() if name.startswith("graph_u_")
         }
+        graph_u_shift = {}
+        if graph_u_enabled:
+            graph_u_shift = {
+                "graph_u_shift_mode": self.config.graph_u_shift_mode,
+                "graph_u_query_scale": self.config.graph_u_query_scale,
+                "graph_u_query_location": self.config.graph_u_query_location,
+            }
+            if self.config.graph_u_shift_mode == "sampled":
+                source = graph_func.nodes_[graph_u_node_idx].random_points_
+                graph_u_shift.update(
+                    graph_u_query_scale=source.graph_u_query_scale_,
+                    graph_u_query_location=source.graph_u_query_location_,
+                )
         return Dataset(
             tensors=tensors,
             feature_specs=data_prop.feature_specs,
@@ -333,4 +346,5 @@ class RandomDataset(PriorComponent):
             graph_u_constructed_y_child_node_idx=constructed_y_child_idx,
             graph_u_config=graph_u_config,
             graph_u_fit_policy="support_only" if graph_u_enabled else None,
+            **graph_u_shift,
         )

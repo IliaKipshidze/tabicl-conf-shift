@@ -35,8 +35,32 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--features", type=int, default=5)
     generate.add_argument("--min-train-size", type=float, default=0.3)
     generate.add_argument("--max-train-size", type=float, default=0.9)
-    generate.add_argument("--query-location", type=float, default=2.0)
-    generate.add_argument("--query-scale", type=float, default=1.5)
+    generate.add_argument(
+        "--query-location", type=float, default=2.0,
+        help="Query source location in fixed mode; sampled mode uses --query-location-mean.",
+    )
+    generate.add_argument(
+        "--query-scale", type=float, default=1.5,
+        help="Query source scale in fixed mode; sampled mode uses --query-scale-mean.",
+    )
+    generate.add_argument(
+        "--shift-mode",
+        choices=("fixed", "sampled"),
+        default="fixed",
+        help="Use fixed query parameters, or sample independent truncated normals per task.",
+    )
+    shift_defaults = PriorConfig()
+    for parameter in ("scale", "location"):
+        for statistic in ("mean", "std", "min", "max"):
+            generate.add_argument(
+                f"--query-{parameter}-{statistic}",
+                type=float,
+                default=getattr(shift_defaults, f"graph_u_query_{parameter}_{statistic}"),
+                help=(
+                    f"Sampled-mode query {parameter} {statistic}; "
+                    "mean/std describe the normal before truncation."
+                ),
+            )
     generate.add_argument("--structure-mode", choices=("add_root",), default="add_root")
     generate.add_argument(
         "--graph-u-mode",
@@ -73,6 +97,14 @@ def main(argv: list[str] | None = None) -> None:
             graph_u_mode=args.graph_u_mode,
             graph_u_query_location=args.query_location,
             graph_u_query_scale=args.query_scale,
+            graph_u_shift_mode=args.shift_mode,
+            **{
+                f"graph_u_query_{parameter}_{statistic}": getattr(
+                    args, f"query_{parameter}_{statistic}"
+                )
+                for parameter in ("scale", "location")
+                for statistic in ("mean", "std", "min", "max")
+            },
             graph_u_force_gaussian=args.force_gaussian,
             graph_u_max_attempts=args.max_attempts,
             filter_unpredictable_graphs=True,

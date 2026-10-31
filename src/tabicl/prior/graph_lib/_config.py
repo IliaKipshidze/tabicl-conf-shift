@@ -9,6 +9,20 @@ def str2bool(value):
     return value.lower() == "true"
 
 
+# Shared defaults for CLI/metadata round trips. Fixed mode never samples these.
+GRAPH_U_SAMPLING_DEFAULTS = {
+    "graph_u_shift_mode": "fixed",
+    "graph_u_query_scale_mean": 1.5,
+    "graph_u_query_scale_std": 0.1,
+    "graph_u_query_scale_min": 1.3,
+    "graph_u_query_scale_max": 1.7,
+    "graph_u_query_location_mean": 2.0,
+    "graph_u_query_location_std": 0.15,
+    "graph_u_query_location_min": 1.7,
+    "graph_u_query_location_max": 2.3,
+}
+
+
 @dataclass
 class PriorConfig:
     """Configuration options for the prior."""
@@ -46,10 +60,37 @@ class PriorConfig:
     graph_u_mode: Literal["confounding", "covariate"] = "confounding"
     graph_u_query_location: float = 0.0
     graph_u_query_scale: float = 1.0
+    # In sampled mode these independent truncated normals replace fixed values.
+    graph_u_shift_mode: Literal["fixed", "sampled"] = "fixed"
+    graph_u_query_scale_mean: float = 1.5
+    graph_u_query_scale_std: float = 0.1
+    graph_u_query_scale_min: float = 1.3
+    graph_u_query_scale_max: float = 1.7
+    graph_u_query_location_mean: float = 2.0
+    graph_u_query_location_std: float = 0.15
+    graph_u_query_location_min: float = 1.7
+    graph_u_query_location_max: float = 2.3
     graph_u_force_gaussian: bool = False
     graph_u_max_attempts: int = 1000
 
     def __post_init__(self) -> None:
+        if not isinstance(self.graph_u_shift_mode, str) or self.graph_u_shift_mode not in {"fixed", "sampled"}:
+            raise ValueError("graph_u_shift_mode must be 'fixed' or 'sampled'")
+        for parameter in ("scale", "location"):
+            prefix = f"graph_u_query_{parameter}"
+            mean, std, lower, upper = (
+                getattr(self, f"{prefix}_{suffix}") for suffix in ("mean", "std", "min", "max")
+            )
+            if not all(math.isfinite(value) for value in (mean, std, lower, upper)):
+                raise ValueError(f"{prefix} sampling parameters must be finite")
+            if std <= 0:
+                raise ValueError(f"{prefix}_std must be positive")
+            if not lower < upper:
+                raise ValueError(f"{prefix}_min must be less than {prefix}_max")
+            if not lower <= mean <= upper:
+                raise ValueError(f"{prefix}_mean must lie within its sampling bounds")
+            if parameter == "scale" and lower <= 0:
+                raise ValueError("graph_u_query_scale_min must be positive")
         if not isinstance(self.graph_u_mode, str) or self.graph_u_mode not in {
             "confounding", "covariate"
         }:
@@ -121,7 +162,11 @@ class PriorConfig:
                            graph_u_query_location=getattr(args, "graph_u_query_location", 0.0),
                            graph_u_query_scale=getattr(args, "graph_u_query_scale", 1.0),
                            graph_u_force_gaussian=getattr(args, "graph_u_force_gaussian", False),
-                           graph_u_max_attempts=getattr(args, "graph_u_max_attempts", 1000))
+                           graph_u_max_attempts=getattr(args, "graph_u_max_attempts", 1000),
+                           **{
+                               name: getattr(args, name, default)
+                               for name, default in GRAPH_U_SAMPLING_DEFAULTS.items()
+                           })
 
     @staticmethod
     def add_args_to_parser(parser: argparse.ArgumentParser):
@@ -320,6 +365,25 @@ class PriorConfig:
             type=float,
             help="Positive scale applied to the selected hidden root's query source samples.",
         )
+        parser.add_argument(
+            "--graph_u_shift_mode",
+            default="fixed",
+            choices=("fixed", "sampled"),
+            help=(
+                "Use configured fixed shift values, or draw independent truncated-normal "
+                "scale/location values once per task."
+            ),
+        )
+        for name, default in GRAPH_U_SAMPLING_DEFAULTS.items():
+            if name == "graph_u_shift_mode":
+                continue
+            parser.add_argument(
+                f"--{name}", default=default, type=float,
+                help=(
+                    "Truncated-normal parameter used only when graph_u_shift_mode=sampled. "
+                    "The std is for the underlying normal before truncation."
+                ),
+            )
         parser.add_argument(
             "--graph_u_force_gaussian",
             default=False,

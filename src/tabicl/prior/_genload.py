@@ -39,7 +39,7 @@ import numpy as np
 from torch.utils.data import IterableDataset, DataLoader
 
 from tabicl.prior._dataset import PriorDataset
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
 from tabicl.prior._prior_config import DEFAULT_FIXED_HP, DEFAULT_SAMPLED_HP
 
 warnings.filterwarnings(
@@ -545,6 +545,10 @@ class SavePriorDataset:
             "graph_u_query_scale": getattr(self.args, "graph_u_query_scale", 1.0),
             "graph_u_force_gaussian": getattr(self.args, "graph_u_force_gaussian", False),
             "graph_u_max_attempts": getattr(self.args, "graph_u_max_attempts", 1000),
+            **{
+                key: getattr(self.args, key, default)
+                for key, default in GRAPH_U_SAMPLING_DEFAULTS.items()
+            },
         }
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)

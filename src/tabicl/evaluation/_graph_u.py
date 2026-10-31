@@ -29,7 +29,7 @@ from tabicl.__about__ import __version__
 from tabicl._model.inference_config import InferenceConfig
 from tabicl._model.tabicl import TabICL
 from tabicl.prior._dataset import GraphPrior
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
 from tabicl.train._checkpoint import get_matched_graph_u_config, normalize_config
 
 TaskType = Literal["classification", "regression"]
@@ -60,6 +60,7 @@ class EvaluationCondition:
     force_gaussian: bool
     source: str
     mode: Literal["confounding", "covariate"] = "confounding"
+    sampling_config: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class EvaluationCondition:
             "graph_u_query_scale": self.query_scale,
             "graph_u_force_gaussian": self.force_gaussian,
             "source": self.source,
+            **(self.sampling_config or {}),
         }
 
 
@@ -373,6 +375,11 @@ def resolve_conditions(
                 force_gaussian=bool(matched_config["graph_u_force_gaussian"]),
                 source=f"matched to {reference.path}",
                 mode=matched_config["graph_u_mode"],
+                sampling_config=(
+                    {key: matched_config[key] for key in GRAPH_U_SAMPLING_DEFAULTS}
+                    if matched_config.get("graph_u_shift_mode") == "sampled"
+                    else None
+                ),
             )
         else:
             assert spec.query_location is not None and spec.query_scale is not None
@@ -405,6 +412,11 @@ def prior_reconstruction_details(
     # Absence denotes the sole historical implementation, rejection sampling.
     stored.setdefault("graph_u_structure_mode", "reject")
     stored.setdefault("graph_u_mode", "confounding")
+    # These fields did not exist in historical fixed-shift priors. Their
+    # absence is unambiguous and does not make those priors incomplete.
+    if stored.get("graph_u_shift_mode", "fixed") == "fixed":
+        for key, default in GRAPH_U_SAMPLING_DEFAULTS.items():
+            stored.setdefault(key, default)
     missing = sorted(_PRIOR_CONFIG_FIELDS - stored.keys())
     return {
         "source": (
@@ -477,7 +489,10 @@ def build_prior_config(
         graph_u_query_location=condition.query_location,
         graph_u_query_scale=condition.query_scale,
         graph_u_force_gaussian=condition.force_gaussian,
+        graph_u_shift_mode="fixed",
     )
+    if condition.sampling_config is not None:
+        kwargs.update(condition.sampling_config)
     if max_attempts is not None:
         kwargs["graph_u_max_attempts"] = max_attempts
     return PriorConfig(**kwargs)

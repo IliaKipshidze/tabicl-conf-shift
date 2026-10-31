@@ -17,7 +17,7 @@ from tabicl.nano_graph_u.model import NanoTabPFNModel
 from tabicl.nano_graph_u.select import WINNERS_FORMAT
 from tabicl.nano_graph_u.train import _sha256_file
 from tabicl.nano_graph_u.tune import LEARNING_RATES, trial_spec
-from tabicl.prior.graph_lib._config import PriorConfig
+from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
 
 
 def _metadata_for(condition, *, seed, steps, graph_u_mode="confounding"):
@@ -561,3 +561,36 @@ def test_covariate_winner_cannot_be_used_as_confounding_winner(make_inputs):
         final_tests._load_winner(wrong_spec)
     with pytest.raises(ValueError, match="prior_config"):
         final_tests.validate_test_bank(spec["test_dump"], "identity", 1)
+
+
+@pytest.mark.parametrize(
+    "mode,test_mode",
+    [
+        ("confounding", None),
+        ("covariate", None),
+        ("confounding", "covariate"),
+        ("covariate", "confounding"),
+    ],
+)
+def test_historical_winners_and_banks_without_sampling_fields_remain_usable(
+    make_inputs, mode, test_mode
+):
+    h5py = pytest.importorskip("h5py")
+    spec, manifest, metadata = make_inputs(
+        task_id=4,
+        graph_u_mode=mode,
+        test_graph_u_mode=test_mode,
+        legacy_confounding=True,
+    )
+    checkpoint = torch.load(spec["checkpoint"], map_location="cpu", weights_only=True)
+    for key in GRAPH_U_SAMPLING_DEFAULTS:
+        checkpoint["prior_config"].pop(key, None)
+        checkpoint["dump_metadata"]["prior_config"].pop(key, None)
+        metadata["prior_config"].pop(key, None)
+    torch.save(checkpoint, spec["checkpoint"])
+    winner = next(item for item in manifest["winners"] if item["checkpoint"] == spec["checkpoint"])
+    winner["checkpoint_sha256"] = _sha256_file(Path(spec["checkpoint"]))
+    Path(spec["manifest_path"]).write_text(json.dumps(manifest), encoding="utf-8")
+    with h5py.File(spec["test_dump"], "r+") as stream:
+        stream.attrs["metadata_json"] = json.dumps(metadata)
+    final_tests.validate_test_result(_result(spec, manifest, metadata), spec)

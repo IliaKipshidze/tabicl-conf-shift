@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 
 from tabicl.prior.graph_lib._base import PriorComponent
+from tabicl.prior.graph_lib._shift import sample_graph_u_query_shift
 from tabicl.prior.graph_lib._weights import RandomWeights
 
 
@@ -35,9 +36,13 @@ class RandomPoints(PriorComponent):
                 )
 
             points = base_points(self.context).sample(n_batch, n)
+            # This path is reached only for the selected root, once per task.
+            # Use direct draws rather than the shared meta/global sampler, which
+            # could otherwise reuse one pair across multiple tables.
+            self.graph_u_query_scale_, self.graph_u_query_location_ = sample_graph_u_query_shift(self.config)
             points[graph_u_n_train:] = (
-                self.config.graph_u_query_scale * points[graph_u_n_train:]
-                + self.config.graph_u_query_location
+                self.graph_u_query_scale_ * points[graph_u_n_train:]
+                + self.graph_u_query_location_
             )
 
             # Fit and apply exactly one root function to the combined support-query tensor.

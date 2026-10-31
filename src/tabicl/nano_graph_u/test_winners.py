@@ -13,6 +13,7 @@ from typing import Any
 import torch
 
 from .data import NanoPriorDumpLoader
+from ._settings import normalize_sampling_config
 from .evaluate import evaluate_checkpoint
 from .select import WINNERS_FORMAT
 from .train import PAPER_MODEL_CONFIG, _sha256_file
@@ -53,6 +54,7 @@ def test_spec(
     graph_u_mode: str = "confounding",
     test_graph_u_mode: str | None = None,
     training_data_root: str | Path | None = None,
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map each repetition to both winners and banks, optionally across constructions."""
     if (
@@ -112,6 +114,8 @@ def test_spec(
         raise ValueError(
             "Matched testing requires the same training and test data root"
         )
+    if sampling_config is not None:
+        spec["sampling_config"] = normalize_sampling_config(sampling_config)
     return spec
 
 
@@ -121,13 +125,17 @@ def _validate_test_metadata(
     repetition: int,
     *,
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> None:
     if metadata.get("seed") != 2000 + repetition:
         raise ValueError("Test bank must use this repetition's independent test seed")
     # Test and validation banks have the same scientific configuration and size;
     # only their root seeds differ. Validate a copy without changing provenance.
     normalized = dict(metadata, seed=3001)
-    _validate_metadata(normalized, condition, "validation", graph_u_mode=graph_u_mode)
+    _validate_metadata(
+        normalized, condition, "validation", graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
+    )
 
 
 def validate_test_bank(
@@ -136,10 +144,12 @@ def validate_test_bank(
     repetition: int,
     *,
     graph_u_mode: str = "confounding",
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     loader = NanoPriorDumpLoader(path, batch_size=BATCH_SIZE, device="cpu")
     _validate_test_metadata(
-        loader.metadata, condition, repetition, graph_u_mode=graph_u_mode
+        loader.metadata, condition, repetition, graph_u_mode=graph_u_mode,
+        sampling_config=sampling_config,
     )
     if loader.committed_steps != TEST_STEPS:
         raise ValueError(
@@ -158,6 +168,7 @@ def _validate_winner_entry(
         data_root,
         search_root,
         graph_u_mode=spec.get("graph_u_mode", "confounding"),
+        sampling_config=spec.get("sampling_config"),
     )
     expected = {
         "repetition": spec["repetition"],
@@ -201,6 +212,8 @@ def _load_winner(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], 
         "graph_u_mode", "confounding"
     ):
         raise ValueError("Winner manifest uses a different Graph-U mode")
+    if manifest.get("sampling_config") != spec.get("sampling_config"):
+        raise ValueError("Winner manifest uses a different shift-sampling configuration")
     expected = {
         "format": WINNERS_FORMAT,
         "data_root": str(_training_data_root(spec)),
@@ -259,6 +272,7 @@ def _validate_checkpoint(
         "train",
         spec["repetition"],
         graph_u_mode=spec.get("graph_u_mode", "confounding"),
+        sampling_config=spec.get("sampling_config"),
     )
     candidate = _validate_winner_entry(winner, spec)
     config = checkpoint.get("train_config", {})
@@ -323,6 +337,7 @@ def validate_test_result(
         spec["test_condition"],
         spec["repetition"],
         graph_u_mode=_test_mode(spec),
+        sampling_config=spec.get("sampling_config"),
     )
     if _is_cross_mode(spec) and (
         not _is_digest(result.get("training_generator_source_sha256"))
@@ -350,6 +365,7 @@ def validate_test_result(
             spec["test_condition"],
             spec["repetition"],
             graph_u_mode=_test_mode(spec),
+            sampling_config=spec.get("sampling_config"),
         )
         if (
             report["dump_metadata"] != metadata
@@ -384,6 +400,7 @@ def run_test(
     graph_u_mode: str = "confounding",
     test_graph_u_mode: str | None = None,
     training_data_root: str | Path | None = None,
+    sampling_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = test_spec(
         task_id,
@@ -393,6 +410,7 @@ def run_test(
         graph_u_mode=graph_u_mode,
         test_graph_u_mode=test_graph_u_mode,
         training_data_root=training_data_root,
+        sampling_config=sampling_config,
     )
     manifest, winner, manifest_hash = _load_winner(spec)
     metadata = validate_test_bank(
@@ -400,6 +418,7 @@ def run_test(
         spec["test_condition"],
         spec["repetition"],
         graph_u_mode=_test_mode(spec),
+        sampling_config=spec.get("sampling_config"),
     )
     if (
         not _is_cross_mode(spec)
