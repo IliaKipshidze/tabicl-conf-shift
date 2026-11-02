@@ -15,7 +15,12 @@ from .evaluate import evaluate_checkpoint
 from .sampled import MODES, _lock, load_experiment, test_for_task
 from .select import _atomic_write, _check_existing
 from .summarize_tests import _csv_bytes
-from .test_winners import METRIC_NAMES, _digest, _validate_test_metadata, validate_test_result
+from .test_winners import (
+    METRIC_NAMES,
+    _digest,
+    _validate_test_metadata,
+    validate_test_result,
+)
 
 SCALE_MEANS = (1.3, 1.7, 1.9, 2.2)
 _SEED_BASE = 4000
@@ -58,7 +63,7 @@ def _validate_bank(spec, *, complete=True):
     if loader.metadata["seed"] != spec["seed"]:
         raise ValueError("Sweep bank uses the wrong independent test seed")
     # Check the original test protocol, allowing only the explicitly new seed
-    # and scale profile. The saved metadata itself is never modified.
+    # and test sampling profile. The saved metadata itself is never modified.
     _validate_test_metadata(
         dict(loader.metadata, seed=2000 + spec["repetition"]), "shift", spec["repetition"],
         graph_u_mode=spec["graph_u_mode"], sampling_config=spec["sampling_config"],
@@ -79,12 +84,13 @@ def _generate_banks(specs, workers):
                 n_jobs=1, workers=workers, resume=exists,
             )
         _validate_bank(spec)
-        print(f"BANK_READY {index}/{len(specs)} mean={spec['scale_mean']} "
+        parameter = spec.get("sweep_parameter", "scale")
+        print(f"BANK_READY {index}/{len(specs)} mean={spec[f'{parameter}_mean']} "
               f"mode={spec['graph_u_mode']} rep={spec['repetition']}", flush=True)
 
 
-def _row(report, model, test_mode, profile, result_path, origin):
-    return {
+def _row(report, model, test_mode, profile, result_path, origin, *, parameter="scale"):
+    row = {
         "training_graph_u_mode": model["training_graph_u_mode"],
         "training_condition": model["training_condition"], "test_graph_u_mode": test_mode,
         "test_condition": "identity" if profile is None else "shift",
@@ -98,6 +104,12 @@ def _row(report, model, test_mode, profile, result_path, origin):
         "test_dump": report["dump"], "test_dump_sha256": report["dump_sha256"],
         "result_path": str(result_path), "result_origin": origin,
     }
+    if parameter == "location":
+        row.update({
+            f"location_{field}": None if profile is None else profile[f"graph_u_query_location_{field}"]
+            for field in ("mean", "std", "min", "max")
+        })
+    return row
 
 
 def load_source(source):
@@ -158,13 +170,15 @@ def _evaluate_banks(root, specs, models, device):
     rows, cache = [], {}
     for spec in specs:
         metadata = _validate_bank(spec).metadata
+        parameter = spec.get("sweep_parameter", "scale")
+        value = spec[f"{parameter}_mean"]
         for mode in MODES:
             for condition in ("identity", "shift"):
                 model = models[(mode, spec["repetition"], condition)]
-                path = root / "results" / f"scale_{_tag(spec['scale_mean'])}" \
+                path = root / "results" / f"{parameter}_{_tag(value)}" \
                     / f"{mode}_on_{spec['graph_u_mode']}" / f"rep_{spec['repetition']}" / f"{condition}.json"
-                binding = {"format": "nano_graph_u_scale_sweep_evaluation_v1", "model": model,
-                           "scale_mean": spec["scale_mean"], "test_sampling_config": spec["sampling_config"]}
+                binding = {"format": f"nano_graph_u_{parameter}_sweep_evaluation_v1", "model": model,
+                           f"{parameter}_mean": value, "test_sampling_config": spec["sampling_config"]}
                 if _digest(Path(model["checkpoint"]), cache) != model["checkpoint_sha256"]:
                     raise ValueError("Selected checkpoint changed during the sweep")
                 if path.exists():
@@ -178,15 +192,22 @@ def _evaluate_banks(root, specs, models, device):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 _atomic_write(path, (json.dumps({**binding, "evaluation_report": report},
                               indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
-                rows.append(_row(report, model, spec["graph_u_mode"], spec["sampling_config"], path, "new_sweep"))
+                rows.append(_row(report, model, spec["graph_u_mode"], spec["sampling_config"], path,
+                                 "new_sweep", parameter=parameter))
                 print(f"EVALUATION_READY {len(rows)}/{4 * len(specs)} "
-                      f"mean={spec['scale_mean']} train={mode}/{condition} test={spec['graph_u_mode']} "
+                      f"mean={value} train={mode}/{condition} test={spec['graph_u_mode']} "
                       f"rep={spec['repetition']}", flush=True)
     return rows
 
 
-def _summarize(rows):
-    keys = ("training_graph_u_mode", "training_condition", "test_graph_u_mode", "test_condition", "scale_mean")
+def _summarize(rows, *, parameter="scale"):
+    if parameter not in {"scale", "location"}:
+        raise ValueError("Sweep parameter must be scale or location")
+    keys = ("training_graph_u_mode", "training_condition", "test_graph_u_mode", "test_condition",
+            f"{parameter}_mean")
+    parameters = ("scale",) if parameter == "scale" else ("scale", "location")
+    profile_fields = [f"{name}_{field}" for name in parameters for field in ("mean", "std", "min", "max")
+                      if f"{name}_{field}" not in keys]
     groups = {}
     for row in rows:
         groups.setdefault(tuple(row[key] for key in keys), []).append(row)
@@ -194,8 +215,10 @@ def _summarize(rows):
     for key, group in groups.items():
         if len(group) != 5 or {row["repetition"] for row in group} != set(range(1, 6)):
             raise ValueError("Each sweep summary cell requires all five repetitions exactly once")
+        if any(row[field] != group[0][field] for row in group for field in profile_fields):
+            raise ValueError("Sweep summary cell contains different sampling profiles")
         cell = {**dict(zip(keys, key)), "repetition_count": 5,
-                **{f"scale_{field}": group[0][f"scale_{field}"] for field in ("std", "min", "max")}}
+                **{field: group[0][field] for field in profile_fields}}
         for metric in METRIC_NAMES:
             cell[f"{metric}_mean"] = mean(row[metric] for row in group)
             cell[f"{metric}_std"] = stdev(row[metric] for row in group)
