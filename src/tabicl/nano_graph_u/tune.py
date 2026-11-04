@@ -14,7 +14,11 @@ import torch
 
 from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS
 
-from ._settings import experiment_prior_config, normalize_sampling_config
+from ._settings import (
+    experiment_prior_config,
+    normalize_fixed_shift_config,
+    normalize_sampling_config,
+)
 from .data import _SEED_SCHEME, NanoPriorDumpLoader
 from .evaluate import evaluate_checkpoint
 from .train import PAPER_MODEL_CONFIG, _sha256_file, train_model
@@ -50,6 +54,7 @@ def trial_spec(
     *,
     graph_u_mode: str = "confounding",
     sampling_config: dict[str, Any] | None = None,
+    fixed_shift_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map the 100 array tasks to five repetitions, two conditions and ten rates."""
     if (
@@ -59,6 +64,8 @@ def trial_spec(
     ):
         raise ValueError("task_id must be an integer from 1 to 100")
     _validate_graph_u_mode(graph_u_mode)
+    if sampling_config is not None and fixed_shift_config is not None:
+        raise ValueError("sampling_config and fixed_shift_config are mutually exclusive")
     repetition, slot = divmod(task_id - 1, 20)
     repetition += 1
     condition = "identity" if slot < 10 else "shift"
@@ -97,6 +104,8 @@ def trial_spec(
         spec["graph_u_mode"] = graph_u_mode
     if sampling_config is not None:
         spec["sampling_config"] = normalize_sampling_config(sampling_config)
+    if fixed_shift_config is not None:
+        spec["fixed_shift_config"] = normalize_fixed_shift_config(fixed_shift_config)
     return spec
 
 
@@ -108,6 +117,7 @@ def _validate_metadata(
     *,
     graph_u_mode: str = "confounding",
     sampling_config: dict[str, Any] | None = None,
+    fixed_shift_config: dict[str, Any] | None = None,
 ) -> int:
     _validate_graph_u_mode(graph_u_mode)
     if condition not in ("identity", "shift") or split not in ("train", "validation"):
@@ -135,7 +145,9 @@ def _validate_metadata(
         "n_jobs": 1,
         "max_step_retries": 8,
     }
-    prior_config = experiment_prior_config(condition, graph_u_mode, sampling_config)
+    prior_config = experiment_prior_config(
+        condition, graph_u_mode, sampling_config, fixed_shift_config=fixed_shift_config,
+    )
     expected["prior_config"] = asdict(prior_config)
     for key, value in expected.items():
         actual = metadata.get(key)
@@ -174,12 +186,14 @@ def validate_bank(
     *,
     graph_u_mode: str = "confounding",
     sampling_config: dict[str, Any] | None = None,
+    fixed_shift_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require complete, correctly configured banks before any optimization."""
     loader = NanoPriorDumpLoader(path, batch_size=BATCH_SIZE, device="cpu")
     steps = _validate_metadata(
         loader.metadata, condition, split, repetition, graph_u_mode=graph_u_mode,
         sampling_config=sampling_config,
+        fixed_shift_config=fixed_shift_config,
     )
     if loader.committed_steps != steps:
         raise ValueError(
@@ -228,12 +242,14 @@ def validate_trial_result(
         )
     graph_u_mode = spec.get("graph_u_mode", "confounding")
     sampling_config = spec.get("sampling_config")
+    fixed_shift_config = spec.get("fixed_shift_config")
     _validate_metadata(
         report.get("dump_metadata", {}),
         spec["condition"],
         "validation",
         graph_u_mode=graph_u_mode,
         sampling_config=sampling_config,
+        fixed_shift_config=fixed_shift_config,
     )
     score = report.get("metrics", {}).get("roc_auc")
     if (
@@ -251,6 +267,7 @@ def validate_trial_result(
             spec["repetition"],
             graph_u_mode=graph_u_mode,
             sampling_config=sampling_config,
+            fixed_shift_config=fixed_shift_config,
         )
         validation_metadata = validate_bank(
             spec["validation_dump"],
@@ -258,6 +275,7 @@ def validate_trial_result(
             "validation",
             graph_u_mode=graph_u_mode,
             sampling_config=sampling_config,
+            fixed_shift_config=fixed_shift_config,
         )
         if (
             train_metadata["generator_source_sha256"]
@@ -306,11 +324,13 @@ def run_trial(
     device: str = "cuda",
     graph_u_mode: str = "confounding",
     sampling_config: dict[str, Any] | None = None,
+    fixed_shift_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Train one candidate and score only its matching validation bank."""
     spec = trial_spec(
         task_id, data_root, output_root, graph_u_mode=graph_u_mode,
         sampling_config=sampling_config,
+        fixed_shift_config=fixed_shift_config,
     )
     training = validate_bank(
         spec["train_dump"],
@@ -319,6 +339,7 @@ def run_trial(
         spec["repetition"],
         graph_u_mode=graph_u_mode,
         sampling_config=sampling_config,
+        fixed_shift_config=fixed_shift_config,
     )
     validation = validate_bank(
         spec["validation_dump"],
@@ -326,6 +347,7 @@ def run_trial(
         "validation",
         graph_u_mode=graph_u_mode,
         sampling_config=sampling_config,
+        fixed_shift_config=fixed_shift_config,
     )
     if training["generator_source_sha256"] != validation["generator_source_sha256"]:
         raise ValueError(
