@@ -101,6 +101,7 @@ def train_model(
     checkpoint_dir: str | Path,
     *,
     steps: int = 2500,
+    epochs: int = 1,
     batch_size: int = 32,
     seed: int = 42,
     device: str = "cuda",
@@ -114,8 +115,13 @@ def train_model(
     The dump must have at least ``steps`` complete batches.  The loader checks
     that every table in a batch has the same support/query split; no split is
     silently taken from another table.  ``steps`` counts completed optimizer
-    updates, so a resumed run reads only the remaining dump batches.
+    updates for the default single pass. With ``epochs > 1``, each epoch reads
+    the same first ``steps`` batches in the same order, keeping the optimizer
+    state between passes. Checkpoint steps count global optimizer updates;
+    resumption continues at the corresponding epoch and batch.
     """
+    if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
+        raise ValueError("epochs must be a positive integer")
     if steps <= 0 or batch_size <= 0 or save_every <= 0 or log_every <= 0:
         raise ValueError(
             "steps, batch_size, save_every, and log_every must be positive"
@@ -124,6 +130,7 @@ def train_model(
         raise ValueError("seed must be non-negative")
     if learning_rate <= 0:
         raise ValueError("learning_rate must be positive")
+    total_steps = steps * epochs
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is unavailable; use --device cpu only for a smoke test"
@@ -174,6 +181,9 @@ def train_model(
         "dump_path": str(dump_path),
         "dump_sha256": _sha256_file(dump_path),
     }
+    # Keep the original single-pass checkpoint configuration unchanged.
+    if epochs != 1:
+        train_config.update(epochs=epochs, steps_per_epoch=steps)
 
     torch.manual_seed(seed)
     np.random.seed(seed % (2**32))
@@ -197,8 +207,8 @@ def train_model(
         if checkpoint.get("train_config") != train_config:
             raise ValueError("Checkpoint training configuration differs from this run")
         start_step = int(checkpoint["step"])
-        if not 0 <= start_step <= steps:
-            raise ValueError(f"Checkpoint step {start_step} is outside 0..{steps}")
+        if not 0 <= start_step <= total_steps:
+            raise ValueError(f"Checkpoint step {start_step} is outside 0..{total_steps}")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         torch.set_rng_state(checkpoint["torch_rng_state"])
@@ -222,23 +232,29 @@ def train_model(
     output_dir.mkdir(parents=True, exist_ok=True)
     optimizer.train()
     model.train()
-    if start_step == steps:
-        print(f"Already completed {steps} updates: {latest}", flush=True)
+    if start_step == total_steps:
+        print(f"Already completed {total_steps} updates: {latest}", flush=True)
         return latest
 
     print(
         f"Nano-Graph-U: {sum(p.numel() for p in model.parameters()):,} parameters; "
-        f"updates {start_step + 1}..{steps}; batch={batch_size}; device={compute_device}",
+        f"updates {start_step + 1}..{total_steps}; batch={batch_size}; device={compute_device}",
         flush=True,
     )
-    loader = NanoPriorDumpLoader(
-        dump_path,
-        num_steps=steps,
-        batch_size=batch_size,
-        start_step=start_step,
-        device="cpu",
-    )
-    for step, batch in enumerate(loader, start=start_step + 1):
+    if epochs != 1:
+        print(f"epochs={epochs}; batches_per_epoch={steps}; fixed batch order", flush=True)
+
+    def remaining_batches():
+        for epoch in range(start_step // steps, epochs):
+            first_batch = start_step % steps if epoch == start_step // steps else 0
+            loader = NanoPriorDumpLoader(
+                dump_path, num_steps=steps, batch_size=batch_size,
+                start_step=first_batch, device="cpu",
+            )
+            for batch_index, batch in enumerate(loader, start=first_batch + 1):
+                yield epoch * steps + batch_index, batch
+
+    for step, batch in remaining_batches():
         x = batch["x"].to(device=compute_device, dtype=torch.float32)
         y = batch["y"].to(device=compute_device, dtype=torch.long)
         split = int(batch["train_test_split_index"])
@@ -270,9 +286,9 @@ def train_model(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if step == 1 or step % log_every == 0 or step == steps:
-            print(f"step={step}/{steps} query_nll={loss.item():.6f}", flush=True)
-        if step % save_every == 0 or step == steps:
+        if step == 1 or step % log_every == 0 or step == total_steps:
+            print(f"step={step}/{total_steps} query_nll={loss.item():.6f}", flush=True)
+        if step % save_every == 0 or step == total_steps:
             # Schedule-free AdamW uses averaged (evaluation) weights after
             # optimizer.eval(); save those for standalone evaluation.  Its
             # optimizer state is saved too so optimizer.train() can resume.
