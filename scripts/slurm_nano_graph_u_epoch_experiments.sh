@@ -12,13 +12,14 @@
 # Existing repetition-1 banks only; no data generation. Each task tunes three
 # learning rates for one model and epoch budget, then tests its selected winner.
 # IID models are retrained once per budget and reused across the four fixed pairs.
+# Whole saved batches are shuffled reproducibly each epoch, using the model seed.
 # Preview: bash scripts/slurm_nano_graph_u_epoch_experiments.sh --dry-run
 # Submit:  sbatch scripts/slurm_nano_graph_u_epoch_experiments.sh
 set -euo pipefail
 
 NANO_CLUSTER_ROOT="${NANO_CLUSTER_ROOT:-/home/bin/CISPA-scratch/c01ilki}"
 NANO_FIXED_ROOT="${NANO_FIXED_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-fixed-experiments}"
-NANO_EPOCH_ROOT="${NANO_EPOCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-epoch-experiments}"
+NANO_EPOCH_ROOT="${NANO_EPOCH_ROOT:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift-epoch-experiments-shuffled}"
 NANO_REPO_DIR="${NANO_REPO_DIR:-${NANO_CLUSTER_ROOT}/tabicl-conf-shift}"
 NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
@@ -104,6 +105,7 @@ configure_task() {
 print_plan() {
     echo "task=${NANO_TASK_ID} epochs=${NANO_EPOCHS} updates=$(( 2500 * NANO_EPOCHS )) mode=${NANO_MODE} condition=${NANO_CONDITION} repetition=1 pair=${NANO_PAIR_TAG} location=${NANO_LOCATION} scale=${NANO_SCALE}"
     echo "Learning rates=0.0007,0.001,0.002; selection=matching validation AUROC at the full epoch budget"
+    echo "Batch order=seeded permutation of whole batches per epoch; model_seed=42; scheme=seedsequence_model_epoch_v1"
     echo "Training=${NANO_DATA_ROOT}/rep_1/${NANO_CONDITION}_train_seed1001_2500steps_b32_r150_f5.h5"
     echo "Shared validation=${NANO_DATA_ROOT}/validation/${NANO_CONDITION}_validation_seed3001_100steps_b32_r150_f5.h5"
     printf 'Command:'; printf ' %q' python -u -m tabicl.nano_graph_u.epoch_experiments "${NANO_ARGS[@]}"; printf '\n'

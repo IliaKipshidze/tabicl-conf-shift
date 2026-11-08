@@ -67,6 +67,8 @@ def test_task_mapping_covers_all_budgets_and_reuses_only_repetition_one(banks):
     assert len({str(spec["directory"]) for spec in specs}) == 30
     assert {spec["repetition"] for spec in specs} == {1}
     assert {spec["model_seed"] for spec in specs} == {42}
+    assert all(spec["shuffle_batches"] is True for spec in specs)
+    assert {spec["batch_order_scheme"] for spec in specs} == {"seedsequence_model_epoch_v1"}
     for budget, expected_epochs in enumerate(epochs.EPOCHS):
         group = specs[budget * 10 : (budget + 1) * 10]
         assert {spec["epochs"] for spec in group} == {expected_epochs}
@@ -104,6 +106,7 @@ def compute(monkeypatch):
         assert options["steps"] == 2500 and options["epochs"] in epochs.EPOCHS
         assert options["batch_size"] == 32 and options["seed"] == 42
         assert options["learning_rate"] in epochs.LEARNING_RATES
+        assert options["shuffle_batches"] is True
         data = metadata(dump)
         config = {
             "seed": 42, "batch_size": 32, "learning_rate": options["learning_rate"],
@@ -111,6 +114,7 @@ def compute(monkeypatch):
             "gradient_clip_norm": 1.0, "loss": "query_cross_entropy", "precision": "float32",
             "dump_path": str(Path(dump).resolve()), "dump_sha256": _sha256_file(Path(dump)),
             "epochs": options["epochs"], "steps_per_epoch": 2500,
+            "shuffle_batches": True, "batch_order_scheme": "seedsequence_model_epoch_v1",
         }
         path = Path(directory) / "latest.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +184,8 @@ def test_all_budgets_select_matching_validation_winners_and_collect_without_sd(b
     assert len(rows) == len(summary) == 192
     assert set(rows["repetition"]) == {1}
     assert set(rows["epochs"]) == set(epochs.EPOCHS)
+    assert rows["shuffle_batches"].all() and summary["shuffle_batches"].all()
+    assert set(rows["batch_order_scheme"]) == {"seedsequence_model_epoch_v1"}
     assert not any(column.endswith("_std") for column in summary)
     keys = ["epochs", "fixed_location", "fixed_scale", "training_graph_u_mode",
             "training_condition", "test_graph_u_mode", "test_condition"]
@@ -212,22 +218,30 @@ def test_partial_source_bank_fails_before_optimization(banks, compute, split):
     assert not compute["train"] and not compute["validation"] and not compute["test"]
 
 
-@pytest.mark.parametrize("corruption", ["checkpoint_budget", "report_budget", "metric_count"])
+@pytest.mark.parametrize("corruption", ["checkpoint_budget", "report_budget", "metric_count",
+                                       "unshuffled_checkpoint", "unshuffled_validation"])
 def test_completed_candidate_rejects_wrong_epoch_or_incomplete_scores(banks, compute, corruption):
     cluster, fixed, root = banks
     epochs.run_experiment(cluster, fixed, root, 3, device="cpu")
     directory = Path(epochs.task_spec(cluster, fixed, root, 3)["directory"])
     candidate = directory / "candidates/lr_0p0007"
-    if corruption == "checkpoint_budget":
+    if corruption in ("checkpoint_budget", "unshuffled_checkpoint"):
         path = candidate / "checkpoints/latest.pt"
         payload = torch.load(path, map_location="cpu", weights_only=True)
-        payload["step"] = 2500
+        if corruption == "checkpoint_budget":
+            payload["step"] = 2500
+        else:
+            payload["train_config"].pop("shuffle_batches")
+            payload["train_config"].pop("batch_order_scheme")
         torch.save(payload, path)
     else:
         path = candidate / "validation.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         report = payload["validation_report"]
-        if corruption == "report_budget":
+        if corruption == "unshuffled_validation":
+            payload["task"].pop("shuffle_batches")
+            payload["task"].pop("batch_order_scheme")
+        elif corruption == "report_budget":
             report["checkpoint_step"] = 2500
         else:
             report["metric_task_counts"]["roc_auc"] = 3199

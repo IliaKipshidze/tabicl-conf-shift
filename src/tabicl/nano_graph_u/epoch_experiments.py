@@ -16,7 +16,7 @@ from .sampled import MODES, _lock
 from .select import _atomic_write, _retain_checkpoint
 from .summarize_tests import _csv_bytes
 from .test_winners import METRIC_NAMES, _digest
-from .train import PAPER_MODEL_CONFIG, train_model
+from .train import BATCH_ORDER_SCHEME, PAPER_MODEL_CONFIG, train_model
 from .tune import TRAIN_STEPS, _validate_metadata
 
 EPOCHS = (3, 6, 10)
@@ -47,6 +47,7 @@ def task_spec(cluster_root, fixed_root, root, task_id):
         "mode": mode, "condition": condition, "pair_id": pair_id,
         "fixed_shift_config": pair["fixed_shift_config"] if pair else None,
         "repetition": 1, "model_seed": 42,
+        "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
         "cluster_root": str(cluster), "fixed_root": str(fixed), "root": str(output),
         "directory": str(output / f"epochs_{epochs}" / tag / mode),
         "train_dump": str(data / "rep_1" / f"{condition}_train_seed1001_2500steps_b32_r150_f5.h5"),
@@ -126,6 +127,7 @@ def _check_checkpoint(checkpoint, spec, rate, training, cache):
         "gradient_clip_norm": 1.0, "loss": "query_cross_entropy", "precision": "float32",
         "dump_path": training["dump"], "dump_sha256": _digest(Path(training["dump"]), cache),
         "epochs": spec["epochs"], "steps_per_epoch": TRAIN_STEPS,
+        "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
     }
     if (payload.get("format") != "nano_graph_u_v1"
         or payload.get("step") != spec["total_steps"]
@@ -147,6 +149,7 @@ def _candidate(spec, rate, training, validation, device, cache):
         report = result["validation_report"]
     else:
         train_model(training["dump"], checkpoint.parent, steps=TRAIN_STEPS, epochs=spec["epochs"],
+                    shuffle_batches=True,
                     batch_size=32, seed=42, learning_rate=rate, device=device,
                     save_every=TRAIN_STEPS, log_every=250, resume=checkpoint.is_file())
         _check_checkpoint(checkpoint, spec, rate, training, cache)
@@ -183,6 +186,7 @@ def _evaluate(spec, winner, banks, device, cache):
         for pair_id in pairs:
             location, scale = FIXED_SHIFTS[pair_id - 1]
             rows.append({"epochs": spec["epochs"], "training_steps": spec["total_steps"],
+                         "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
                          "fixed_location": location, "fixed_scale": scale,
                          **_row(report, winner, bank["mode"], bank["condition"], path,
                                 "shared_iid" if bank["pair_id"] is None and spec["pair_id"] is None
@@ -214,6 +218,7 @@ def _collect_if_complete(cluster_root, fixed_root, root):
                 raise ValueError("Completed test rows differ from their evaluation reports")
             rows.extend(expected_rows)
             winners.append({"epochs": spec["epochs"], "training_pair_id": spec["pair_id"],
+                            "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
                             "training_graph_u_mode": spec["mode"], "training_condition": spec["condition"],
                             "repetition": 1, "learning_rate": winner["learning_rate"],
                             "validation_roc_auc": winner["validation_roc_auc"],
@@ -228,6 +233,7 @@ def _collect_if_complete(cluster_root, fixed_root, root):
             raise ValueError("Epoch results must contain all 192 repetition-one comparisons exactly once")
         rows.sort(key=lambda row: tuple(row[key] for key in columns))
         cells = [{**{key: row[key] for key in columns}, "repetition_count": 1,
+                  "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
                   **{f"{metric}_mean": row[metric] for metric in METRIC_NAMES}} for row in rows]
         result_dir = root / "results"
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -235,6 +241,7 @@ def _collect_if_complete(cluster_root, fixed_root, root):
             _atomic_write(result_dir / name, _csv_bytes(values, list(values[0])))
         _json(result_dir / "summary.json", {"format": "nano_graph_u_epoch_summary_v1",
               "epochs": list(EPOCHS), "learning_rates": list(LEARNING_RATES), "repetitions": [1],
+              "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
               "selection_metric": "matching_validation_roc_auc", "winners": winners,
               "cells": cells, "per_repetition": rows})
     print(f"EPOCH_RESULTS_COMPLETE winners=30 comparisons=192 results={result_dir}", flush=True)
@@ -255,6 +262,7 @@ def run_experiment(cluster_root, fixed_root, root, task_id, *, device="cuda"):
         selected = max(candidates, key=lambda candidate: (candidate["validation_roc_auc"], -candidate["learning_rate"]))
         winner = {**selected, "training_graph_u_mode": spec["mode"], "training_condition": spec["condition"],
                   "repetition": 1, "model_seed": 42, "epochs": spec["epochs"],
+                  "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
                   "checkpoint": str(directory / "winner/model.pt"),
                   "query_location": 0.0 if spec["condition"] == "identity" else spec["fixed_shift_config"]["graph_u_query_location"],
                   "query_scale": 1.0 if spec["condition"] == "identity" else spec["fixed_shift_config"]["graph_u_query_scale"],

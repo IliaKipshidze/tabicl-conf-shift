@@ -22,6 +22,7 @@ from .data import NanoPriorDumpLoader
 from .model import NanoTabPFNModel
 
 CHECKPOINT_FORMAT = "nano_graph_u_v1"
+BATCH_ORDER_SCHEME = "seedsequence_model_epoch_v1"
 PAPER_MODEL_CONFIG = {
     "embedding_size": 96,
     "num_attention_heads": 4,
@@ -29,6 +30,12 @@ PAPER_MODEL_CONFIG = {
     "num_layers": 3,
     "num_outputs": 2,
 }
+
+
+def _epoch_batch_order(steps: int, seed: int, epoch: int) -> list[int]:
+    """Use a local RNG so ordering does not consume model/optimizer randomness."""
+    rng = np.random.default_rng(np.random.SeedSequence([seed, epoch]))
+    return rng.permutation(steps).tolist()
 
 
 def _sha256_file(path: Path) -> str:
@@ -102,6 +109,7 @@ def train_model(
     *,
     steps: int = 2500,
     epochs: int = 1,
+    shuffle_batches: bool = False,
     batch_size: int = 32,
     seed: int = 42,
     device: str = "cuda",
@@ -116,12 +124,15 @@ def train_model(
     that every table in a batch has the same support/query split; no split is
     silently taken from another table.  ``steps`` counts completed optimizer
     updates for the default single pass. With ``epochs > 1``, each epoch reads
-    the same first ``steps`` batches in the same order, keeping the optimizer
-    state between passes. Checkpoint steps count global optimizer updates;
-    resumption continues at the corresponding epoch and batch.
+    the same first ``steps`` batches, keeping the optimizer state between
+    passes. ``shuffle_batches=True`` permutes whole batches each epoch using
+    the model seed and epoch index. Checkpoint steps count global optimizer
+    updates; resumption restores the same order and position within that epoch.
     """
     if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs <= 0:
         raise ValueError("epochs must be a positive integer")
+    if not isinstance(shuffle_batches, bool):
+        raise TypeError("shuffle_batches must be a boolean")
     if steps <= 0 or batch_size <= 0 or save_every <= 0 or log_every <= 0:
         raise ValueError(
             "steps, batch_size, save_every, and log_every must be positive"
@@ -184,6 +195,8 @@ def train_model(
     # Keep the original single-pass checkpoint configuration unchanged.
     if epochs != 1:
         train_config.update(epochs=epochs, steps_per_epoch=steps)
+    if shuffle_batches:
+        train_config.update(shuffle_batches=True, batch_order_scheme=BATCH_ORDER_SCHEME)
 
     torch.manual_seed(seed)
     np.random.seed(seed % (2**32))
@@ -241,17 +254,23 @@ def train_model(
         f"updates {start_step + 1}..{total_steps}; batch={batch_size}; device={compute_device}",
         flush=True,
     )
-    if epochs != 1:
-        print(f"epochs={epochs}; batches_per_epoch={steps}; fixed batch order", flush=True)
+    if epochs != 1 or shuffle_batches:
+        order = "seeded shuffled batch order" if shuffle_batches else "fixed batch order"
+        print(f"epochs={epochs}; batches_per_epoch={steps}; {order}", flush=True)
 
     def remaining_batches():
         for epoch in range(start_step // steps, epochs):
             first_batch = start_step % steps if epoch == start_step // steps else 0
             loader = NanoPriorDumpLoader(
                 dump_path, num_steps=steps, batch_size=batch_size,
-                start_step=first_batch, device="cpu",
+                start_step=0 if shuffle_batches else first_batch, device="cpu",
             )
-            for batch_index, batch in enumerate(loader, start=first_batch + 1):
+            if shuffle_batches:
+                order = _epoch_batch_order(steps, seed, epoch)
+                batches = loader.iter_batches(order[first_batch:])
+            else:
+                batches = iter(loader)
+            for batch_index, batch in enumerate(batches, start=first_batch + 1):
                 yield epoch * steps + batch_index, batch
 
     for step, batch in remaining_batches():

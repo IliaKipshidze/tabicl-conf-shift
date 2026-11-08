@@ -18,7 +18,7 @@ import json
 import multiprocessing as mp
 import os
 import random
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -509,9 +509,27 @@ class NanoPriorDumpLoader:
         return self.num_steps - self.start_step
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
+        return self.iter_batches(range(self.start_step, self.num_steps))
+
+    def iter_batches(self, batch_indices: Iterable[int]) -> Iterator[dict[str, Any]]:
+        """Read whole stored batches in the requested order without rewriting them.
+
+        A subset is allowed so a resumed epoch can skip completed updates.
+        Indices must be distinct and inside this loader's configured range.
+        """
+        indices = list(batch_indices)
+        seen = set()
+        for index in indices:
+            if isinstance(index, bool) or not isinstance(index, (int, np.integer)):
+                raise TypeError("batch indices must be integers")
+            if not self.start_step <= index < self.num_steps:
+                raise ValueError("batch index is outside the configured loader range")
+            if index in seen:
+                raise ValueError("batch indices must not contain duplicates")
+            seen.add(index)
         h5py = _require_h5py()
         with h5py.File(self.path, "r") as file:
-            for step in range(self.start_step, self.num_steps):
+            for step in indices:
                 start, end = step * self.batch_size, (step + 1) * self.batch_size
                 x = torch.from_numpy(file["x"][start:end]).to(self.device)
                 y = torch.from_numpy(file["y"][start:end]).to(self.device)

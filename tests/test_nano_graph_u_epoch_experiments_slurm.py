@@ -69,10 +69,19 @@ def test_all_30_task_plans_use_rep1_shared_validation_and_separate_outputs(bash,
             "--cluster-root": job_env["NANO_CLUSTER_ROOT"], "--fixed-root": job_env["NANO_FIXED_ROOT"],
             "--root": job_env["NANO_EPOCH_ROOT"], "--task-id": str(task), "--device": "cuda"}
     assert result.stdout.count("Learning rates=0.0007,0.001,0.002") == 30
+    assert result.stdout.count("Batch order=seeded permutation of whole batches per epoch") == 30
     assert result.stdout.count("/rep_1/") == 30
     assert result.stdout.count("/validation/") == 30
     assert "validation_seed3001_100steps_b32_r150_f5.h5" in result.stdout
     assert "192 rows" in result.stdout and "156 unique test evaluations" in result.stdout
+    assert not list(tmp_path.iterdir())
+
+
+def test_default_output_keeps_shuffled_runs_separate(bash, job_env, tmp_path):
+    job_env.pop("NANO_EPOCH_ROOT")
+    result = run(bash, job_env, "--dry-run")
+    assert result.returncode == 0, result.stderr
+    assert f"New outputs={job_env['NANO_CLUSTER_ROOT']}/tabicl-conf-shift-epoch-experiments-shuffled;" in result.stdout
     assert not list(tmp_path.iterdir())
 
 
