@@ -94,6 +94,29 @@ def test_array_preview_selects_only_one_task(bash, job_env, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("options", [
+    ("--dry-run", "--training-eval-only"), ("--training-eval-only", "--dry-run"),
+])
+def test_training_only_preview_uses_existing_winners_without_training(bash, job_env, tmp_path, options):
+    result = run(bash, job_env, *options)
+    assert result.returncode == 0, result.stderr
+    commands = [shlex.split(line.removeprefix("Command:"))
+                for line in result.stdout.splitlines() if line.startswith("Command:")]
+    assert len(commands) == 30 and all(command[-1] == "--training-eval-only" for command in commands)
+    assert "30 training-bank evaluations of already selected models" in result.stdout
+    assert "48 rows" in result.stdout
+    assert result.stdout.count("Frozen selected winner;") == 30
+    assert "90 candidates" not in result.stdout and "Learning rates=" not in result.stdout
+    assert "Shared validation=" not in result.stdout
+    assert not list(tmp_path.iterdir())
+
+
+def test_unknown_flag_is_rejected_before_any_files_or_activation(bash, job_env, tmp_path):
+    result = run(bash, job_env, "--training-eval-only", "--unknown")
+    assert result.returncode != 0 and "Usage:" in result.stderr
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("task", ["", "0", "31", "01", "1.0", "../1"])
 def test_invalid_array_tasks_fail_without_files(bash, job_env, tmp_path, task):
     job_env["SLURM_ARRAY_TASK_ID"] = task
@@ -125,7 +148,8 @@ def test_invalid_settings_fail_before_activation(bash, job_env, tmp_path, settin
 
 
 @pytest.mark.parametrize("exit_code,gpu_exit", [("0", "0"), ("7", "0"), ("0", "9")])
-def test_execution_runs_one_controller_and_propagates_failures(bash, job_env, tmp_path, exit_code, gpu_exit):
+@pytest.mark.parametrize("training_only", [False, True])
+def test_execution_runs_one_controller_and_propagates_failures(bash, job_env, tmp_path, exit_code, gpu_exit, training_only):
     initialization = tmp_path / "conda/etc/profile.d/conda.sh"
     initialization.parent.mkdir(parents=True)
     initialization.write_text(
@@ -133,14 +157,17 @@ def test_execution_runs_one_controller_and_propagates_failures(bash, job_env, tm
         'python() { if [[ "${1:-}" == "-" ]]; then return "$EPOCH_TEST_GPU_EXIT"; fi; '
         'printf "%s\\n" "$@" > "$EPOCH_TEST_LOG"; return "$EPOCH_TEST_EXIT"; }\n', encoding="utf-8")
     job_env.update(SLURM_ARRAY_TASK_ID="13", EPOCH_TEST_EXIT=exit_code, EPOCH_TEST_GPU_EXIT=gpu_exit)
-    result = run(bash, job_env)
+    result = run(bash, job_env, *(["--training-eval-only"] if training_only else []))
     assert result.returncode == int(gpu_exit if gpu_exit != "0" else exit_code)
     if gpu_exit != "0":
         assert not (tmp_path / "args.txt").exists()
     else:
         args = (tmp_path / "args.txt").read_text().splitlines()
+        if training_only:
+            assert args.pop() == "--training-eval-only"
         assert args[:3] == ["-u", "-m", "tabicl.nano_graph_u.epoch_experiments"]
         assert dict(zip(args[3::2], args[4::2])) == {
             "--cluster-root": job_env["NANO_CLUSTER_ROOT"], "--fixed-root": job_env["NANO_FIXED_ROOT"],
             "--root": job_env["NANO_EPOCH_ROOT"], "--task-id": "13", "--device": "cuda"}
-    assert ("EPOCH_EXPERIMENT_JOB_COMPLETE" in result.stdout) == (exit_code == gpu_exit == "0")
+    marker = "EPOCH_TRAINING_EVALUATION_JOB_COMPLETE" if training_only else "EPOCH_EXPERIMENT_JOB_COMPLETE"
+    assert (marker in result.stdout) == (exit_code == gpu_exit == "0")

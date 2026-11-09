@@ -13,6 +13,7 @@
 # learning rates for one model and epoch budget, then tests its selected winner.
 # IID models are retrained once per budget and reused across the four fixed pairs.
 # Whole saved batches are shuffled reproducibly each epoch, using the model seed.
+# --training-eval-only scores the frozen winners on their own training banks.
 # Preview: bash scripts/slurm_nano_graph_u_epoch_experiments.sh --dry-run
 # Submit:  sbatch scripts/slurm_nano_graph_u_epoch_experiments.sh
 set -euo pipefail
@@ -25,12 +26,15 @@ NANO_CONDA_ROOT="${NANO_CONDA_ROOT:-${NANO_CLUSTER_ROOT}/miniconda3}"
 NANO_ENV_PATH="${NANO_ENV_PATH:-${NANO_CONDA_ROOT}/envs/tabicl-conf-shift}"
 NANO_TASK_ID="${SLURM_ARRAY_TASK_ID:-}"
 NANO_DRY_RUN=false
+NANO_TRAINING_EVAL_ONLY=false
 
-if [[ "$#" == 1 && "${1:-}" == --dry-run ]]; then
-    NANO_DRY_RUN=true
-elif [[ "$#" != 0 ]]; then
-    echo "Usage: $0 [--dry-run]" >&2; exit 1
-fi
+for NANO_OPTION in "$@"; do
+    case "${NANO_OPTION}" in
+        --dry-run) NANO_DRY_RUN=true ;;
+        --training-eval-only) NANO_TRAINING_EVAL_ONLY=true ;;
+        *) echo "Usage: $0 [--dry-run] [--training-eval-only]" >&2; exit 1 ;;
+    esac
+done
 for NANO_NAME in NANO_CLUSTER_ROOT NANO_FIXED_ROOT NANO_EPOCH_ROOT NANO_REPO_DIR NANO_CONDA_ROOT NANO_ENV_PATH; do
     if [[ "${!NANO_NAME}" != /* ]]; then
         echo "${NANO_NAME} must be an absolute path" >&2; exit 1
@@ -101,19 +105,31 @@ configure_task() {
     fi
     NANO_ARGS=(--cluster-root "${NANO_CLUSTER_ROOT}" --fixed-root "${NANO_FIXED_ROOT}"
         --root "${NANO_EPOCH_ROOT}" --task-id "${NANO_TASK_ID}" --device cuda)
+    if [[ "${NANO_TRAINING_EVAL_ONLY}" == true ]]; then
+        NANO_ARGS+=(--training-eval-only)
+    fi
 }
 print_plan() {
     echo "task=${NANO_TASK_ID} epochs=${NANO_EPOCHS} updates=$(( 2500 * NANO_EPOCHS )) mode=${NANO_MODE} condition=${NANO_CONDITION} repetition=1 pair=${NANO_PAIR_TAG} location=${NANO_LOCATION} scale=${NANO_SCALE}"
-    echo "Learning rates=0.0007,0.001,0.002; selection=matching validation AUROC at the full epoch budget"
-    echo "Batch order=seeded permutation of whole batches per epoch; model_seed=42; scheme=seedsequence_model_epoch_v1"
+    if [[ "${NANO_TRAINING_EVAL_ONLY}" == true ]]; then
+        echo "Frozen selected winner; score all 80,000 own-training tasks; no training, tuning or selection"
+    else
+        echo "Learning rates=0.0007,0.001,0.002; selection=matching validation AUROC at the full epoch budget"
+        echo "Batch order=seeded permutation of whole batches per epoch; model_seed=42; scheme=seedsequence_model_epoch_v1"
+        echo "Shared validation=${NANO_DATA_ROOT}/validation/${NANO_CONDITION}_validation_seed3001_100steps_b32_r150_f5.h5"
+    fi
     echo "Training=${NANO_DATA_ROOT}/rep_1/${NANO_CONDITION}_train_seed1001_2500steps_b32_r150_f5.h5"
-    echo "Shared validation=${NANO_DATA_ROOT}/validation/${NANO_CONDITION}_validation_seed3001_100steps_b32_r150_f5.h5"
     printf 'Command:'; printf ' %q' python -u -m tabicl.nano_graph_u.epoch_experiments "${NANO_ARGS[@]}"; printf '\n'
 }
 
 echo "Read-only inputs: original IID banks plus fixed banks at ${NANO_FIXED_ROOT}"
-echo "New outputs=${NANO_EPOCH_ROOT}; 90 candidates, 30 selected models, 156 unique test evaluations"
-echo "Results collected automatically after all 30 tasks: 192 rows; repetition 1 only"
+if [[ "${NANO_TRAINING_EVAL_ONLY}" == true ]]; then
+    echo "New outputs=${NANO_EPOCH_ROOT}; 30 training-bank evaluations of already selected models"
+    echo "Training results collected automatically after all 30 tasks: 48 rows; repetition 1 only"
+else
+    echo "New outputs=${NANO_EPOCH_ROOT}; 90 candidates, 30 selected models, 156 unique test evaluations"
+    echo "Results collected automatically after all 30 tasks: 192 rows; repetition 1 only"
+fi
 if [[ "${NANO_DRY_RUN}" == true ]]; then
     if [[ "${SLURM_ARRAY_TASK_ID+x}" == x ]]; then
         configure_task "${NANO_TASK_ID}"; print_plan
@@ -137,4 +153,8 @@ if not torch.cuda.is_available():
 print(f"GPU: {torch.cuda.get_device_name(0)}")
 PY
 python -u -m tabicl.nano_graph_u.epoch_experiments "${NANO_ARGS[@]}"
-echo "EPOCH_EXPERIMENT_JOB_COMPLETE task=${NANO_TASK_ID} root=${NANO_EPOCH_ROOT}"
+if [[ "${NANO_TRAINING_EVAL_ONLY}" == true ]]; then
+    echo "EPOCH_TRAINING_EVALUATION_JOB_COMPLETE task=${NANO_TASK_ID} root=${NANO_EPOCH_ROOT}"
+else
+    echo "EPOCH_EXPERIMENT_JOB_COMPLETE task=${NANO_TASK_ID} root=${NANO_EPOCH_ROOT}"
+fi

@@ -96,7 +96,7 @@ def _test_banks(spec):
     return banks
 
 
-def _check_report(report, checkpoint, bank, total_steps, cache):
+def _check_report(report, checkpoint, bank, total_steps, cache, *, task_count=3200):
     if (
         report.get("format") != "nano_graph_u_evaluation_v1"
         or report.get("checkpoint") != str(checkpoint)
@@ -105,15 +105,15 @@ def _check_report(report, checkpoint, bank, total_steps, cache):
         or report.get("dump") != bank["dump"]
         or report.get("dump_sha256") != _digest(Path(bank["dump"]), cache)
         or report.get("dump_metadata") != bank["metadata"]
-        or report.get("task_count") != 3200
+        or report.get("task_count") != task_count
         or isinstance(report.get("query_row_count"), bool)
         or not isinstance(report.get("query_row_count"), int)
-        or not 0 < report["query_row_count"] < 3200 * 150
+        or not 0 < report["query_row_count"] < task_count * 150
     ):
-        raise ValueError("Report must match the epoch-budget checkpoint and all 3,200 evaluation tasks")
+        raise ValueError(f"Report must match the epoch-budget checkpoint and all {task_count:,} evaluation tasks")
     for metric in METRIC_NAMES:
         value = report.get("metrics", {}).get(metric)
-        if (report.get("metric_task_counts", {}).get(metric) != 3200
+        if (report.get("metric_task_counts", {}).get(metric) != task_count
             or isinstance(value, bool) or not isinstance(value, (int, float))
             or not math.isfinite(value) or value < 0 or (metric != "nll" and value > 1)):
             raise ValueError(f"Incomplete or invalid metric: {metric}")
@@ -278,6 +278,116 @@ def run_experiment(cluster_root, fixed_root, root, task_id, *, device="cuda"):
     return result
 
 
+def _selected_training(spec, cache):
+    """Bind training-set scoring to the already selected and tested winner."""
+    directory = Path(spec["directory"])
+    source = directory / "complete.json"
+    completed = json.loads(source.read_text(encoding="utf-8"))
+    if completed.get("format") != "nano_graph_u_epoch_task_v1" or completed.get("task") != spec:
+        raise ValueError("Training evaluation requires this task's completed test results")
+    winner = completed["winner"]
+    if json.loads((directory / "winner.json").read_text(encoding="utf-8")) != winner:
+        raise ValueError("Selected winner differs from the model used for testing")
+    expected = {"epochs": spec["epochs"], "training_steps": spec["total_steps"],
+                "training_graph_u_mode": spec["mode"], "training_condition": spec["condition"],
+                "repetition": 1, "model_seed": 42, "shuffle_batches": True,
+                "batch_order_scheme": BATCH_ORDER_SCHEME, "learning_rate": winner["learning_rate"],
+                "checkpoint": str(directory / "winner/model.pt"),
+                "checkpoint_sha256": winner["checkpoint_sha256"]}
+    pairs = [FIXED_SHIFTS[spec["pair_id"] - 1]] if spec["pair_id"] else FIXED_SHIFTS
+    expected_cases = {(*pair, mode, condition) for pair in pairs for mode in MODES
+                      for condition in ("identity", "shift")}
+    rows = completed.get("rows", [])
+    if (winner["learning_rate"] not in LEARNING_RATES or winner["checkpoint"] != expected["checkpoint"]
+        or len(rows) != len(expected_cases)
+        or {(row["fixed_location"], row["fixed_scale"], row["test_graph_u_mode"], row["test_condition"])
+            for row in rows} != expected_cases
+        or any(any(row.get(key) != value for key, value in expected.items()) for row in rows)):
+        raise ValueError("Completed test rows do not identify this frozen selected model")
+    training = _bank(spec["train_dump"], spec["condition"], "train", spec["mode"], spec["fixed_shift_config"])
+    _check_checkpoint(winner["checkpoint"], spec, winner["learning_rate"], training, cache)
+    if _digest(Path(winner["checkpoint"]), cache) != winner["checkpoint_sha256"]:
+        raise ValueError("Selected checkpoint changed after testing")
+    binding = {"task": spec, "winner": winner, "test_results_sha256": _digest(source, cache),
+               "training_dump_sha256": _digest(Path(training["dump"]), cache)}
+    return training, binding
+
+
+def _load_training_evaluation(spec, cache):
+    training, binding = _selected_training(spec, cache)
+    saved = json.loads((Path(spec["directory"]) / "training_evaluation.json").read_text(encoding="utf-8"))
+    if saved.get("format") != "nano_graph_u_epoch_training_evaluation_v1" or any(
+        saved.get(key) != value for key, value in binding.items()
+    ):
+        raise ValueError("Saved training evaluation belongs to a different selected model")
+    report = saved["evaluation_report"]
+    _check_report(report, binding["winner"]["checkpoint"], training, spec["total_steps"], cache, task_count=80000)
+    return report, binding["winner"]
+
+
+def _collect_training_if_complete(cluster_root, fixed_root, root):
+    root = Path(root).resolve()
+    specs = [task_spec(cluster_root, fixed_root, root, task) for task in range(1, 31)]
+    if any(not (Path(spec["directory"]) / "training_evaluation.json").is_file() for spec in specs):
+        return False
+    with _lock(root / "results/.training_summary.job.lock", blocking=True):
+        rows, cache = [], {}
+        for spec in specs:
+            report, winner = _load_training_evaluation(spec, cache)
+            pairs = [FIXED_SHIFTS[spec["pair_id"] - 1]] if spec["pair_id"] else FIXED_SHIFTS
+            for location, scale in pairs:
+                rows.append({"epochs": spec["epochs"], "training_steps": spec["total_steps"],
+                    "fixed_location": location, "fixed_scale": scale,
+                    "training_graph_u_mode": spec["mode"], "training_condition": spec["condition"],
+                    "repetition": 1, "model_seed": 42, "learning_rate": winner["learning_rate"],
+                    "shuffle_batches": True, "batch_order_scheme": BATCH_ORDER_SCHEME,
+                    "evaluation_split": "training", "scored_rows": "query", "task_count": 80000,
+                    "query_row_count": report["query_row_count"], **report["metrics"],
+                    "checkpoint": report["checkpoint"], "checkpoint_sha256": report["checkpoint_sha256"],
+                    "training_dump": report["dump"], "training_dump_sha256": report["dump_sha256"],
+                    "result_path": str(Path(spec["directory"]) / "training_evaluation.json"),
+                    "result_origin": "shared_iid" if spec["pair_id"] is None else "own_shift_training"})
+        keys = ["epochs", "fixed_location", "fixed_scale", "training_graph_u_mode", "training_condition"]
+        expected = {(epoch, *pair, mode, condition) for epoch in EPOCHS for pair in FIXED_SHIFTS
+                    for mode in MODES for condition in ("identity", "shift")}
+        if len(rows) != 48 or {tuple(row[key] for key in keys) for row in rows} != expected:
+            raise ValueError("Training scores require all 48 epoch/model/shift comparisons")
+        rows.sort(key=lambda row: tuple(row[key] for key in keys))
+        cells = [{**{key: row[key] for key in keys}, "repetition_count": 1,
+                  "task_count_per_repetition": 80000, "evaluation_split": "training", "scored_rows": "query",
+                  **{f"{metric}_mean": row[metric] for metric in METRIC_NAMES}} for row in rows]
+        for name, values in (("training_per_repetition.csv", rows), ("training_summary.csv", cells)):
+            path = root / "results" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(path, _csv_bytes(values, list(values[0])))
+    print(f"EPOCH_TRAINING_RESULTS_COMPLETE models=30 rows=48 results={root / 'results'}", flush=True)
+    return True
+
+
+def run_training_evaluation(cluster_root, fixed_root, root, task_id, *, device="cuda"):
+    """Evaluate frozen winners on their own training tasks; never optimize/select."""
+    spec = task_spec(cluster_root, fixed_root, root, task_id)
+    directory = Path(spec["directory"])
+    with _lock(directory / ".training_evaluation.job.lock"):
+        if (directory / "training_evaluation.json").is_file():
+            report, _ = _load_training_evaluation(spec, {})
+        else:
+            training, binding = _selected_training(spec, {})
+            checkpoint = binding["winner"]["checkpoint"]
+            report = evaluate_checkpoint(checkpoint, training["dump"], batch_size=32, max_batches=None,
+                                         device=device, allow_training_dump=True)
+            _check_report(report, checkpoint, training, spec["total_steps"], {}, task_count=80000)
+            if (report["dump_sha256"] != binding["training_dump_sha256"]
+                or _digest(Path(checkpoint), None) != binding["winner"]["checkpoint_sha256"]
+                or _digest(directory / "complete.json", None) != binding["test_results_sha256"]):
+                raise ValueError("Selected model or its inputs changed during training evaluation")
+            _json(directory / "training_evaluation.json", {
+                "format": "nano_graph_u_epoch_training_evaluation_v1", **binding, "evaluation_report": report})
+    _collect_training_if_complete(cluster_root, fixed_root, root)
+    print(f"EPOCH_TRAINING_EVALUATION_COMPLETE task={task_id} tasks=80000", flush=True)
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cluster-root", required=True, type=Path)
@@ -285,8 +395,11 @@ def main(argv=None):
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--task-id", required=True, type=int)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--training-eval-only", action="store_true",
+                        help="Score already selected winners on their own training banks; no optimization")
     args = parser.parse_args(argv)
-    run_experiment(args.cluster_root, args.fixed_root, args.root, args.task_id, device=args.device)
+    run = run_training_evaluation if args.training_eval_only else run_experiment
+    run(args.cluster_root, args.fixed_root, args.root, args.task_id, device=args.device)
 
 
 if __name__ == "__main__":
