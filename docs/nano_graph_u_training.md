@@ -1,10 +1,8 @@
 # Paper-scale Nano-Graph-U at CISPA
 
-Nano-Graph-U is a **separate preliminary experiment**. It uses the paper-era
+Nano-Graph-U combines the paper-era
 [`nanoTabPFN` model](https://github.com/automl/nanoTabPFN/tree/530670098e4befabe80825a3eefed408a926e34a)
-and training recipe with this repository's existing constructed Graph-U
-`graph_scm` prior. It does not replace `python -m tabicl.train`, modify full
-TabICL checkpoints, or claim that Graph-U was validated by the Nano paper.
+and training recipe with this repository's constructed Graph-U `graph_scm` prior.
 
 The default full Nano run follows the [paper's](https://arxiv.org/html/2511.03634v2)
 model/training scale: 3 layers, 4 heads, embedding 96, hidden MLP 192, binary

@@ -52,13 +52,11 @@ visible GPU.
 
 ## 3. Submit the generator/GPU smoke test
 
-The defaults reproduce the diagnostic shift used during development:
-location `2.0`, scale `1.5`, 94 observed features, and a random source family.
-The 94-feature default directly covers the case that defeated rejection
-sampling. The default structure mode is `add_root`: TabICL first samples its
-ordinary base graph and then inserts a hidden root U with direct edges to
-distinct observed-X and target nodes. It does not wait for a suitable
-confounder to occur by chance.
+The generator defaults are location `2.0`, scale `1.5`, 94 observed features,
+and a random source family. The default structure mode is `add_root`:
+TabICL first samples its ordinary base graph and then inserts a hidden root U
+with direct edges to distinct observed-X and target nodes. It does not wait
+for a suitable confounder to occur by chance.
 
 ```bash
 sbatch scripts/slurm_graph_u_smoke.sh

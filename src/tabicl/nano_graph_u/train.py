@@ -51,9 +51,8 @@ def _schedulefree_adamw(parameters, *, learning_rate: float):
         from schedulefree import AdamWScheduleFree
     except ImportError as exc:
         raise RuntimeError(
-            "Nano-Graph-U training needs schedulefree. Install the Nano optional "
-            "dependencies (h5py and schedulefree) in the existing environment; "
-            "do not install TFM-Playground's incompatible PyTorch build."
+            "Nano-Graph-U training requires schedulefree. Install it with "
+            "python -m pip install 'schedulefree>=1.4,<2'."
         ) from exc
     return AdamWScheduleFree(parameters, lr=learning_rate, weight_decay=0.0)
 
