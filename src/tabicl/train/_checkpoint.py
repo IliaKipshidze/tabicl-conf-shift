@@ -14,7 +14,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
+from tabicl.prior.graph_lib._config import (
+    GRAPH_U_POOL_DEFAULTS,
+    GRAPH_U_SAMPLING_DEFAULTS,
+    PriorConfig,
+)
 
 CHECKPOINT_METADATA_VERSION = 1
 _GRAPH_U_KEYS = (
@@ -162,7 +166,22 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             f"prior_type='graph_scm', got {prior_type!r}."
         )
 
-    missing = [key for key in _GRAPH_U_KEYS if key not in prior_config]
+    if "graph_u_intervention_mode" not in prior_config and any(
+        key in prior_config for key in GRAPH_U_POOL_DEFAULTS
+    ):
+        raise ValueError("Checkpoint prior_config is missing graph_u_intervention_mode")
+    pool_config = {
+        key: prior_config.get(key, default)
+        for key, default in GRAPH_U_POOL_DEFAULTS.items()
+    }
+    uses_pool = pool_config["graph_u_intervention_mode"] == "support_pool"
+    required = _GRAPH_U_KEYS
+    if uses_pool:
+        required = tuple(
+            key for key in required
+            if key not in {"graph_u_query_location", "graph_u_query_scale"}
+        ) + tuple(GRAPH_U_POOL_DEFAULTS)
+    missing = [key for key in required if key not in prior_config]
     if missing:
         raise ValueError(
             "Checkpoint prior_config is missing required Graph-U fields: "
@@ -178,7 +197,7 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         key: prior_config.get(key, default)
         for key, default in GRAPH_U_SAMPLING_DEFAULTS.items()
     }
-    if sampling_config["graph_u_shift_mode"] == "sampled":
+    if sampling_config["graph_u_shift_mode"] == "sampled" and not uses_pool:
         missing = [key for key in GRAPH_U_SAMPLING_DEFAULTS if key not in prior_config]
         if missing:
             raise ValueError(
@@ -195,11 +214,12 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         ),
         # Before modes were introduced, every Graph-U task used U -> X and U -> Y.
         graph_u_mode=prior_config.get("graph_u_mode", "confounding"),
-        graph_u_query_location=prior_config["graph_u_query_location"],
-        graph_u_query_scale=prior_config["graph_u_query_scale"],
+        graph_u_query_location=prior_config.get("graph_u_query_location", 0.0),
+        graph_u_query_scale=prior_config.get("graph_u_query_scale", 1.0),
         graph_u_force_gaussian=prior_config["graph_u_force_gaussian"],
         graph_u_max_attempts=prior_config["graph_u_max_attempts"],
         **sampling_config,
+        **pool_config,
     )
     matched = {
         "prior_type": prior_type,
@@ -214,6 +234,8 @@ def get_matched_graph_u_config(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     # Preserve the historical fixed-shift representation for existing callers.
     if validated.graph_u_shift_mode == "sampled":
         matched.update({key: getattr(validated, key) for key in GRAPH_U_SAMPLING_DEFAULTS})
+    if uses_pool:
+        matched.update({key: getattr(validated, key) for key in GRAPH_U_POOL_DEFAULTS})
     return matched
 
 

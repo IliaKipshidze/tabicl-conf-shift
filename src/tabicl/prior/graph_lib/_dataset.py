@@ -315,7 +315,12 @@ class RandomDataset(PriorComponent):
             name: value for name, value in vars(self.config).items() if name.startswith("graph_u_")
         }
         graph_u_shift = {}
-        if graph_u_enabled:
+        if graph_u_enabled and self.config.graph_u_intervention_mode == "support_pool":
+            graph_u_shift = {
+                "graph_u_intervention_mode": "support_pool",
+                **graph_func.graph_u_pool_metadata_,
+            }
+        elif graph_u_enabled:
             graph_u_shift = {
                 "graph_u_shift_mode": self.config.graph_u_shift_mode,
                 "graph_u_query_scale": self.config.graph_u_query_scale,

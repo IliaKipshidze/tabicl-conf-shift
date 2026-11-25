@@ -39,7 +39,11 @@ import numpy as np
 from torch.utils.data import IterableDataset, DataLoader
 
 from tabicl.prior._dataset import PriorDataset
-from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
+from tabicl.prior.graph_lib._config import (
+    GRAPH_U_POOL_DEFAULTS,
+    GRAPH_U_SAMPLING_DEFAULTS,
+    PriorConfig,
+)
 from tabicl.prior._prior_config import DEFAULT_FIXED_HP, DEFAULT_SAMPLED_HP
 
 warnings.filterwarnings(
@@ -550,6 +554,11 @@ class SavePriorDataset:
                 for key, default in GRAPH_U_SAMPLING_DEFAULTS.items()
             },
         }
+        if getattr(self.args, "graph_u_intervention_mode", "affine") == "support_pool":
+            metadata.update({
+                key: getattr(self.args, key, default)
+                for key, default in GRAPH_U_POOL_DEFAULTS.items()
+            })
         with open(self.save_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
 

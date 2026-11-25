@@ -12,7 +12,10 @@ from typing import Any
 
 import torch
 
-from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS
+from tabicl.prior.graph_lib._config import (
+    GRAPH_U_POOL_DEFAULTS,
+    GRAPH_U_SAMPLING_DEFAULTS,
+)
 
 from ._settings import (
     experiment_prior_config,
@@ -156,6 +159,11 @@ def _validate_metadata(
             actual = dict(
                 actual, graph_u_mode=actual.get("graph_u_mode", "confounding")
             )
+            if actual.get("graph_u_intervention_mode") == "affine" or not any(
+                field in actual for field in GRAPH_U_POOL_DEFAULTS
+            ):
+                for field, default in GRAPH_U_POOL_DEFAULTS.items():
+                    actual.setdefault(field, default)
             # Older banks predate configurable shift distributions and always
             # used fixed values. Normalize a copy for comparison only; stored
             # provenance, checkpoint hashes and reports remain unchanged.

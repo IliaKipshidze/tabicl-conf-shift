@@ -187,4 +187,50 @@ generation. In `"add_root"` mode, U is node 0 and
 returns tensors only. Saved-prior metadata records the global Graph-U settings,
 but not a per-task graph ledger.
 
+## Common-support resampling of U
+
+Set `graph_u_intervention_mode="support_pool"` to sample query U from the
+task's final support-U vectors, with replacement. Support U uses the usual
+source family and root transformations. Query U is selected after all root
+processing, including optional node noise, and before its children are
+evaluated. Whole vectors are copied; the remaining graph is evaluated normally.
+
+```python
+from tabicl.prior.graph_lib._config import PriorConfig
+
+config = PriorConfig(
+    graph_u_enabled=True,
+    graph_u_structure_mode="add_root",
+    graph_u_intervention_mode="support_pool",
+    graph_u_pool_sampling="gaussian",
+    graph_u_pool_peak_percentile=75,
+    graph_u_pool_std_fraction=0.10,
+)
+```
+
+The Gaussian weights apply to the original support-row indices. There is no
+sorting or scoring of U values. A percentile of 0 selects the first-row center;
+100 selects the last-row center. For a pool of `n` rows, the zero-based center
+is `(n - 1) * percentile / 100` and the Gaussian width is `std_fraction * n`.
+The weights are normalized over the finite pool, so these parameters describe
+the curve's center and width, not its resulting mean and standard deviation.
+
+Use `graph_u_pool_sampling="uniform"` for the matching control, with exactly
+equal probabilities `1 / n`. Both variants depend on the realized support pool;
+the uniform variant is an unshifted pool control, rather than independent
+support/query draws from the original prior. Query U always belongs to the
+support pool and remains hidden from the predictor.
+
+This mode ignores the affine location, scale and sampled-shift parameters.
+The default `graph_u_intervention_mode="affine"` retains the existing fixed
+and sampled source shifts. The shared prior CLI exposes the new `graph_u_*`
+fields, and the Nano generation CLI exposes `--intervention-mode`,
+`--pool-sampling`, `--pool-peak-percentile` and `--pool-std-fraction`.
+
+`GraphSCM.metadata_` includes pool size, distinct-value counts, sampling-weight
+concentration and total variation between the support and query probabilities
+over distinct U vectors. Constant pools or ineffective reweightings are flagged
+without adding a new task-rejection rule. U values and sampled indices are not
+stored in this metadata or exposed as training columns.
+
 

@@ -1,7 +1,7 @@
 import argparse
 import math
 from dataclasses import dataclass
-from numbers import Integral
+from numbers import Integral, Real
 from typing import Literal
 
 
@@ -20,6 +20,13 @@ GRAPH_U_SAMPLING_DEFAULTS = {
     "graph_u_query_location_std": 0.15,
     "graph_u_query_location_min": 1.7,
     "graph_u_query_location_max": 2.3,
+}
+
+GRAPH_U_POOL_DEFAULTS = {
+    "graph_u_intervention_mode": "affine",
+    "graph_u_pool_sampling": "gaussian",
+    "graph_u_pool_peak_percentile": 75.0,
+    "graph_u_pool_std_fraction": 0.1,
 }
 
 
@@ -58,6 +65,10 @@ class PriorConfig:
     graph_u_enabled: bool = False
     graph_u_structure_mode: Literal["reject", "add_root"] = "reject"
     graph_u_mode: Literal["confounding", "covariate"] = "confounding"
+    graph_u_intervention_mode: Literal["affine", "support_pool"] = "affine"
+    graph_u_pool_sampling: Literal["uniform", "gaussian"] = "gaussian"
+    graph_u_pool_peak_percentile: float = 75.0
+    graph_u_pool_std_fraction: float = 0.1
     graph_u_query_location: float = 0.0
     graph_u_query_scale: float = 1.0
     # In sampled mode these independent truncated normals replace fixed values.
@@ -74,6 +85,29 @@ class PriorConfig:
     graph_u_max_attempts: int = 1000
 
     def __post_init__(self) -> None:
+        if not isinstance(self.graph_u_intervention_mode, str) or self.graph_u_intervention_mode not in {
+            "affine", "support_pool"
+        }:
+            raise ValueError("graph_u_intervention_mode must be 'affine' or 'support_pool'")
+        if not isinstance(self.graph_u_pool_sampling, str) or self.graph_u_pool_sampling not in {
+            "uniform", "gaussian"
+        }:
+            raise ValueError("graph_u_pool_sampling must be 'uniform' or 'gaussian'")
+        for name in ("graph_u_pool_peak_percentile", "graph_u_pool_std_fraction"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise ValueError(f"{name} must be a finite real number")  # noqa: TRY004
+            try:
+                value = float(value)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite real number") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite real number")
+            setattr(self, name, value)
+        if not 0 <= self.graph_u_pool_peak_percentile <= 100:
+            raise ValueError("graph_u_pool_peak_percentile must lie between 0 and 100")
+        if self.graph_u_pool_std_fraction <= 0:
+            raise ValueError("graph_u_pool_std_fraction must be positive")
         if not isinstance(self.graph_u_shift_mode, str) or self.graph_u_shift_mode not in {"fixed", "sampled"}:
             raise ValueError("graph_u_shift_mode must be 'fixed' or 'sampled'")
         for parameter in ("scale", "location"):
@@ -165,7 +199,9 @@ class PriorConfig:
                            graph_u_max_attempts=getattr(args, "graph_u_max_attempts", 1000),
                            **{
                                name: getattr(args, name, default)
-                               for name, default in GRAPH_U_SAMPLING_DEFAULTS.items()
+                               for name, default in {
+                                   **GRAPH_U_SAMPLING_DEFAULTS, **GRAPH_U_POOL_DEFAULTS
+                               }.items()
                            })
 
     @staticmethod
@@ -357,21 +393,45 @@ class PriorConfig:
             "--graph_u_query_location",
             default=0.0,
             type=float,
-            help="Location added to the selected hidden root's query source samples.",
+            help="Affine-only location added to the selected hidden root's query source samples.",
+        )
+        parser.add_argument(
+            "--graph_u_intervention_mode",
+            default="affine",
+            choices=("affine", "support_pool"),
+            help="Shift query source samples with an affine transform, or resample final U from support rows.",
+        )
+        parser.add_argument(
+            "--graph_u_pool_sampling",
+            default="gaussian",
+            choices=("uniform", "gaussian"),
+            help="Support-pool row probabilities: equal, or Gaussian-shaped in the original row order.",
+        )
+        parser.add_argument(
+            "--graph_u_pool_peak_percentile",
+            default=75.0,
+            type=float,
+            help="Gaussian peak position from 0 to 100 percent through the support-row list.",
+        )
+        parser.add_argument(
+            "--graph_u_pool_std_fraction",
+            default=0.1,
+            type=float,
+            help="Gaussian width as a positive fraction of the number of support rows.",
         )
         parser.add_argument(
             "--graph_u_query_scale",
             default=1.0,
             type=float,
-            help="Positive scale applied to the selected hidden root's query source samples.",
+            help="Affine-only positive scale applied to the selected hidden root's query source samples.",
         )
         parser.add_argument(
             "--graph_u_shift_mode",
             default="fixed",
             choices=("fixed", "sampled"),
             help=(
-                "Use configured fixed shift values, or draw independent truncated-normal "
-                "scale/location values once per task."
+                "For affine intervention: use fixed shift values, or draw independent "
+                "truncated-normal scale/location values once per task."
             ),
         )
         for name, default in GRAPH_U_SAMPLING_DEFAULTS.items():

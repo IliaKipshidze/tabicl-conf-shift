@@ -19,12 +19,15 @@ class RandomPoints(PriorComponent):
             if not isinstance(graph_u_n_train, Integral) or isinstance(graph_u_n_train, bool):
                 raise TypeError("graph_u_n_train must be an integer")
             graph_u_n_train = int(graph_u_n_train)
-            if not 0 < graph_u_n_train < n_batch:
+            pool_source = self.config.graph_u_intervention_mode == "support_pool"
+            if pool_source and not 0 < graph_u_n_train == n_batch:
+                raise ValueError("A pool root generates source samples for support rows only")
+            if not pool_source and not 0 < graph_u_n_train < n_batch:
                 raise ValueError(
                     "Graph-U requires 0 < graph_u_n_train < n_batch; "
                     f"got graph_u_n_train={graph_u_n_train}, n_batch={n_batch}"
                 )
-            if self.config.graph_u_query_scale <= 0:
+            if not pool_source and self.config.graph_u_query_scale <= 0:
                 raise ValueError("graph_u_query_scale must be positive")
 
             if self.config.graph_u_force_gaussian:
@@ -36,16 +39,15 @@ class RandomPoints(PriorComponent):
                 )
 
             points = base_points(self.context).sample(n_batch, n)
-            # This path is reached only for the selected root, once per task.
-            # Use direct draws rather than the shared meta/global sampler, which
-            # could otherwise reuse one pair across multiple tables.
-            self.graph_u_query_scale_, self.graph_u_query_location_ = sample_graph_u_query_shift(self.config)
-            points[graph_u_n_train:] = (
-                self.graph_u_query_scale_ * points[graph_u_n_train:]
-                + self.graph_u_query_location_
-            )
+            if not pool_source:
+                # Draw directly so separate tasks do not share a sampled pair.
+                self.graph_u_query_scale_, self.graph_u_query_location_ = sample_graph_u_query_shift(self.config)
+                points[graph_u_n_train:] = (
+                    self.graph_u_query_scale_ * points[graph_u_n_train:]
+                    + self.graph_u_query_location_
+                )
 
-            # Fit and apply exactly one root function to the combined support-query tensor.
+            # Pool roots evaluate only support; affine roots evaluate both splits.
             root_context = self.context.with_fit_boundary(graph_u_n_train, n_batch)
             return RandomFunction(root_context, n, n)(points)
 

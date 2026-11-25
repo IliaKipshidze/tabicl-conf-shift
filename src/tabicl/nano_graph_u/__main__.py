@@ -36,18 +36,34 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--min-train-size", type=float, default=0.3)
     generate.add_argument("--max-train-size", type=float, default=0.9)
     generate.add_argument(
+        "--intervention-mode", choices=("affine", "support_pool"), default="affine",
+        help="Apply the affine source shift, or resample final query U from support rows.",
+    )
+    generate.add_argument(
+        "--pool-sampling", choices=("uniform", "gaussian"), default="gaussian",
+        help="Support-pool row probabilities in their original random order.",
+    )
+    generate.add_argument(
+        "--pool-peak-percentile", type=float, default=75.0,
+        help="Gaussian peak position from 0 to 100 percent through the support-row list.",
+    )
+    generate.add_argument(
+        "--pool-std-fraction", type=float, default=0.1,
+        help="Gaussian width as a positive fraction of the number of support rows.",
+    )
+    generate.add_argument(
         "--query-location", type=float, default=2.0,
-        help="Query source location in fixed mode; sampled mode uses --query-location-mean.",
+        help="Affine-only query source location; sampled mode uses --query-location-mean.",
     )
     generate.add_argument(
         "--query-scale", type=float, default=1.5,
-        help="Query source scale in fixed mode; sampled mode uses --query-scale-mean.",
+        help="Affine-only query source scale; sampled mode uses --query-scale-mean.",
     )
     generate.add_argument(
         "--shift-mode",
         choices=("fixed", "sampled"),
         default="fixed",
-        help="Use fixed query parameters, or sample independent truncated normals per task.",
+        help="For affine intervention: use fixed query parameters, or sample truncated normals per task.",
     )
     shift_defaults = PriorConfig()
     for parameter in ("scale", "location"):
@@ -95,6 +111,10 @@ def main(argv: list[str] | None = None) -> None:
             graph_u_enabled=True,
             graph_u_structure_mode=args.structure_mode,
             graph_u_mode=args.graph_u_mode,
+            graph_u_intervention_mode=args.intervention_mode,
+            graph_u_pool_sampling=args.pool_sampling,
+            graph_u_pool_peak_percentile=args.pool_peak_percentile,
+            graph_u_pool_std_fraction=args.pool_std_fraction,
             graph_u_query_location=args.query_location,
             graph_u_query_scale=args.query_scale,
             graph_u_shift_mode=args.shift_mode,

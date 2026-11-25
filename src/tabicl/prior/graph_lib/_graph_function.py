@@ -3,8 +3,9 @@ from typing import Dict, List, Optional
 
 import torch
 
-from tabicl.prior.graph_lib._base import RandomTransformer, Context, FeatureSpec
+from tabicl.prior.graph_lib._base import Context, FeatureSpec, RandomTransformer
 from tabicl.prior.graph_lib._node_function import RandomNodeFunction
+from tabicl.prior.graph_lib._pool import resample_graph_u_pool
 
 
 class RandomGraphFunction(RandomTransformer):
@@ -92,8 +93,11 @@ class RandomGraphFunction(RandomTransformer):
         self.nodes_ = []
         for node_idx, feature_specs in enumerate(self.node_feature_specs):
             if node_idx == self.graph_u_node_idx:
+                root_context = node_context
+                if self.config.graph_u_intervention_mode == "support_pool":
+                    root_context = node_context.with_fit_boundary(self.n_train, self.n_train)
                 node = RandomNodeFunction(
-                    node_context,
+                    root_context,
                     feature_specs=feature_specs,
                     graph_u_n_train=self.n_train,
                 )
@@ -128,8 +132,17 @@ class RandomGraphFunction(RandomTransformer):
         features = dict()
         for node_idx in range(len(self.node_feature_specs)):
             if self.should_compute_[node_idx]:
-                node_values[node_idx], out_features = self.nodes_[node_idx](
-                    [node_values[parent] for parent in self.dag[node_idx]], n_samples
+                pool_root = (
+                    node_idx == self.graph_u_node_idx
+                    and self.config.graph_u_intervention_mode == "support_pool"
                 )
+                node_values[node_idx], out_features = self.nodes_[node_idx](
+                    [node_values[parent] for parent in self.dag[node_idx]],
+                    self.n_train if pool_root else n_samples,
+                )
+                if pool_root:
+                    node_values[node_idx], self.graph_u_pool_metadata_ = resample_graph_u_pool(
+                        node_values[node_idx], n_samples - self.n_train, self.config
+                    )
                 features = features | out_features
         return features

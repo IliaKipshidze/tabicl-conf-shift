@@ -29,7 +29,11 @@ from tabicl.__about__ import __version__
 from tabicl._model.inference_config import InferenceConfig
 from tabicl._model.tabicl import TabICL
 from tabicl.prior._dataset import GraphPrior
-from tabicl.prior.graph_lib._config import GRAPH_U_SAMPLING_DEFAULTS, PriorConfig
+from tabicl.prior.graph_lib._config import (
+    GRAPH_U_POOL_DEFAULTS,
+    GRAPH_U_SAMPLING_DEFAULTS,
+    PriorConfig,
+)
 from tabicl.train._checkpoint import get_matched_graph_u_config, normalize_config
 
 TaskType = Literal["classification", "regression"]
@@ -61,6 +65,7 @@ class EvaluationCondition:
     source: str
     mode: Literal["confounding", "covariate"] = "confounding"
     sampling_config: dict[str, Any] | None = None
+    pool_config: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +78,7 @@ class EvaluationCondition:
             "graph_u_force_gaussian": self.force_gaussian,
             "source": self.source,
             **(self.sampling_config or {}),
+            **(self.pool_config or {}),
         }
 
 
@@ -324,6 +330,7 @@ def resolve_conditions(
     base_force_gaussian = prior_config.get("graph_u_force_gaussian", False)
     if not isinstance(base_force_gaussian, bool):
         raise TypeError("Reference graph_u_force_gaussian must be a boolean")
+    base_pool = prior_config.get("graph_u_intervention_mode", "affine") == "support_pool"
 
     resolved: list[EvaluationCondition] = []
     names: set[str] = set()
@@ -358,6 +365,14 @@ def resolve_conditions(
                 force_gaussian=base_force_gaussian,
                 source=policy_source,
                 mode=base_mode,
+                pool_config=(
+                    {
+                        **{key: prior_config.get(key, default)
+                           for key, default in GRAPH_U_POOL_DEFAULTS.items()},
+                        "graph_u_pool_sampling": "uniform",
+                    }
+                    if base_pool else None
+                ),
             )
         elif spec.kind == "matched":
             if matched_config is None:
@@ -378,6 +393,11 @@ def resolve_conditions(
                 sampling_config=(
                     {key: matched_config[key] for key in GRAPH_U_SAMPLING_DEFAULTS}
                     if matched_config.get("graph_u_shift_mode") == "sampled"
+                    else None
+                ),
+                pool_config=(
+                    {key: matched_config[key] for key in GRAPH_U_POOL_DEFAULTS}
+                    if matched_config.get("graph_u_intervention_mode") == "support_pool"
                     else None
                 ),
             )
@@ -412,6 +432,11 @@ def prior_reconstruction_details(
     # Absence denotes the sole historical implementation, rejection sampling.
     stored.setdefault("graph_u_structure_mode", "reject")
     stored.setdefault("graph_u_mode", "confounding")
+    if stored.get("graph_u_intervention_mode") == "affine" or not any(
+        key in stored for key in GRAPH_U_POOL_DEFAULTS
+    ):
+        for key, default in GRAPH_U_POOL_DEFAULTS.items():
+            stored.setdefault(key, default)
     # These fields did not exist in historical fixed-shift priors. Their
     # absence is unambiguous and does not make those priors incomplete.
     if stored.get("graph_u_shift_mode", "fixed") == "fixed":
@@ -490,9 +515,12 @@ def build_prior_config(
         graph_u_query_scale=condition.query_scale,
         graph_u_force_gaussian=condition.force_gaussian,
         graph_u_shift_mode="fixed",
+        graph_u_intervention_mode="affine",
     )
     if condition.sampling_config is not None:
         kwargs.update(condition.sampling_config)
+    if condition.pool_config is not None:
+        kwargs.update(condition.pool_config)
     if max_attempts is not None:
         kwargs["graph_u_max_attempts"] = max_attempts
     return PriorConfig(**kwargs)
