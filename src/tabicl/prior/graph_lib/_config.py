@@ -66,7 +66,7 @@ class PriorConfig:
     graph_u_structure_mode: Literal["reject", "add_root"] = "reject"
     graph_u_mode: Literal["confounding", "covariate"] = "confounding"
     graph_u_intervention_mode: Literal["affine", "support_pool"] = "affine"
-    graph_u_pool_sampling: Literal["uniform", "gaussian"] = "gaussian"
+    graph_u_pool_sampling: Literal["uniform", "gaussian", "mixed"] = "gaussian"
     graph_u_pool_peak_percentile: float = 75.0
     graph_u_pool_std_fraction: float = 0.1
     graph_u_query_location: float = 0.0
@@ -90,9 +90,9 @@ class PriorConfig:
         }:
             raise ValueError("graph_u_intervention_mode must be 'affine' or 'support_pool'")
         if not isinstance(self.graph_u_pool_sampling, str) or self.graph_u_pool_sampling not in {
-            "uniform", "gaussian"
+            "uniform", "gaussian", "mixed"
         }:
-            raise ValueError("graph_u_pool_sampling must be 'uniform' or 'gaussian'")
+            raise ValueError("graph_u_pool_sampling must be 'uniform', 'gaussian' or 'mixed'")
         for name in ("graph_u_pool_peak_percentile", "graph_u_pool_std_fraction"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Real):
@@ -404,8 +404,9 @@ class PriorConfig:
         parser.add_argument(
             "--graph_u_pool_sampling",
             default="gaussian",
-            choices=("uniform", "gaussian"),
-            help="Support-pool row probabilities: equal, or Gaussian-shaped in the original row order.",
+            choices=("uniform", "gaussian", "mixed"),
+            help=("Support-pool row probabilities: uniform, Gaussian, or an equal task-level "
+                  "mixture of uniform and Gaussian widths 0.2n, 0.5n and 1.0n."),
         )
         parser.add_argument(
             "--graph_u_pool_peak_percentile",

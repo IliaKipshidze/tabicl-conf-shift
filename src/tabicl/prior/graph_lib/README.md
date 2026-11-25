@@ -221,6 +221,14 @@ the uniform variant is an unshifted pool control, rather than independent
 support/query draws from the original prior. Query U always belongs to the
 support pool and remains hidden from the predictor.
 
+`graph_u_pool_sampling="mixed"` chooses one profile independently for each
+task: uniform, or Gaussian with width `0.2 * n`, `0.5 * n`, or `1.0 * n`, with
+probability 25% each. All Gaussian components use the configured peak percentile;
+`graph_u_pool_std_fraction` is unused in mixed mode. A single selected profile
+governs all query rows of that task. The per-task metadata records its component,
+realized sampling type and Gaussian width. The mixture choice uses the seeded
+task stream, so interrupted generation reproduces the same choices.
+
 This mode ignores the affine location, scale and sampled-shift parameters.
 The default `graph_u_intervention_mode="affine"` retains the existing fixed
 and sampled source shifts. The shared prior CLI exposes the new `graph_u_*`

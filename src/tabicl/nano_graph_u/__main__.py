@@ -40,8 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply the affine source shift, or resample final query U from support rows.",
     )
     generate.add_argument(
-        "--pool-sampling", choices=("uniform", "gaussian"), default="gaussian",
-        help="Support-pool row probabilities in their original random order.",
+        "--pool-sampling", choices=("uniform", "gaussian", "mixed"), default="gaussian",
+        help="Uniform, Gaussian, or equal per-task mixture: uniform and Gaussian widths 0.2n, 0.5n, 1.0n.",
     )
     generate.add_argument(
         "--pool-peak-percentile", type=float, default=75.0,

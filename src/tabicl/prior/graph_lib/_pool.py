@@ -1,10 +1,13 @@
 """Resample final hidden-U vectors from the support rows in their original order."""
 
+from dataclasses import replace
 from numbers import Integral
 
 import torch
 
 from ._config import PriorConfig
+
+GRAPH_U_POOL_MIXED_STD_FRACTIONS = (0.2, 0.5, 1.0)
 
 
 def graph_u_pool_probabilities(
@@ -21,6 +24,8 @@ def graph_u_pool_probabilities(
     if isinstance(n_support, bool) or not isinstance(n_support, Integral) or n_support < 1:
         raise ValueError("n_support must be a positive integer")
     n_support = int(n_support)
+    if config.graph_u_pool_sampling == "mixed":
+        raise ValueError("Mixed pool sampling must resolve one task profile before computing probabilities")
     if config.graph_u_pool_sampling == "uniform":
         return torch.full((n_support,), 1.0 / n_support, dtype=torch.float64, device=device)
 
@@ -52,7 +57,22 @@ def resample_graph_u_pool(
     if isinstance(n_query, bool) or not isinstance(n_query, Integral) or n_query < 1:
         raise ValueError("n_query must be a positive integer")
     n_support = support_u.shape[0]
-    probabilities = graph_u_pool_probabilities(n_support, config, device=support_u.device)
+    task_config = config
+    mixture_metadata = {}
+    if config.graph_u_pool_sampling == "mixed":
+        component = int(torch.randint(
+            len(GRAPH_U_POOL_MIXED_STD_FRACTIONS) + 1, (), device=support_u.device
+        ).item())
+        sampling = "uniform" if component == 0 else "gaussian"
+        width = None if component == 0 else GRAPH_U_POOL_MIXED_STD_FRACTIONS[component - 1]
+        task_config = replace(config, graph_u_pool_sampling=sampling,
+                              graph_u_pool_std_fraction=config.graph_u_pool_std_fraction if width is None else width)
+        mixture_metadata = {
+            "graph_u_pool_mixture_component": component,
+            "graph_u_pool_realized_sampling": sampling,
+            "graph_u_pool_realized_std_fraction": width,
+        }
+    probabilities = graph_u_pool_probabilities(n_support, task_config, device=support_u.device)
     indices = torch.multinomial(probabilities, int(n_query), replacement=True)
     query_u = support_u.index_select(0, indices)
 
@@ -62,7 +82,7 @@ def resample_graph_u_pool(
     support_mass = torch.bincount(states, minlength=n_states).to(torch.float64) / n_support
     query_mass = probabilities.new_zeros(n_states).scatter_add_(0, states, probabilities)
     total_variation = float((support_mass - query_mass).abs().sum() / 2)
-    if n_states == 1 or config.graph_u_pool_sampling == "uniform":
+    if n_states == 1 or task_config.graph_u_pool_sampling == "uniform":
         total_variation = 0.0
     metadata = {
         "graph_u_pool_sampling": config.graph_u_pool_sampling,
@@ -76,5 +96,6 @@ def resample_graph_u_pool(
         "graph_u_pool_reweighted": total_variation > 1e-12,
         "graph_u_pool_effective_sample_size": float(1 / probabilities.square().sum()),
         "graph_u_pool_max_probability": float(probabilities.max()),
+        **mixture_metadata,
     }
     return torch.cat((support_u, query_u), dim=0), metadata
