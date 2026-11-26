@@ -10,6 +10,10 @@ from ._config import PriorConfig
 GRAPH_U_POOL_MIXED_STD_FRACTIONS = (0.2, 0.5, 1.0)
 
 
+class NonFiniteGraphUPoolError(ValueError):
+    """A sampled root produced NaN or infinity before query-U resampling."""
+
+
 def graph_u_pool_probabilities(
     n_support: int,
     config: PriorConfig,
@@ -52,8 +56,10 @@ def resample_graph_u_pool(
     """
     if not isinstance(support_u, torch.Tensor) or support_u.ndim != 2:
         raise ValueError("support_u must be a matrix of complete U vectors")
-    if support_u.shape[0] < 1 or support_u.shape[1] < 1 or not bool(torch.isfinite(support_u).all()):
+    if support_u.shape[0] < 1 or support_u.shape[1] < 1:
         raise ValueError("support_u must contain finite, nonempty U vectors")
+    if not bool(torch.isfinite(support_u).all()):
+        raise NonFiniteGraphUPoolError("support_u must contain finite, nonempty U vectors")
     if isinstance(n_query, bool) or not isinstance(n_query, Integral) or n_query < 1:
         raise ValueError("n_query must be a positive integer")
     n_support = support_u.shape[0]

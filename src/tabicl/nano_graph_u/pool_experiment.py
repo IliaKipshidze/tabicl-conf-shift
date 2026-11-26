@@ -761,7 +761,7 @@ def summarize_results(root):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="stage", required=True)
-    for name in ("generate", "trial", "select", "test", "summarize"):
+    for name in ("generate", "trial", "select", "test", "summarize", "repair"):
         command = commands.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         if name in ("generate", "trial", "test"):
@@ -779,6 +779,10 @@ def main(argv=None):
         select_winners(args.root)
     elif args.stage == "test":
         evaluate_winner(args.root, args.task_id, device=args.device)
+    elif args.stage == "repair":
+        from .pool_repair import repair_banks
+
+        repair_banks(args.root)
     else:
         summarize_results(args.root)
 

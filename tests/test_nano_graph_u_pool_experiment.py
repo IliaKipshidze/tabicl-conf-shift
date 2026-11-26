@@ -348,3 +348,14 @@ def test_aggregation_uses_sample_sd_and_requires_each_repeat():
     )
     with pytest.raises(ValueError, match="five repetitions"):
         pool._aggregate(rows[:-1], ("condition",))
+
+
+def test_repair_cli_only_dispatches_metadata_repair(tmp_path, monkeypatch):
+    from tabicl.nano_graph_u import pool_repair
+
+    calls = []
+    monkeypatch.setattr(pool_repair, "repair_banks", lambda root: calls.append(root))
+    root = tmp_path / "existing pool experiment"
+    pool.main(["repair", "--root", str(root)])
+    assert calls == [root]
+    assert not root.exists()

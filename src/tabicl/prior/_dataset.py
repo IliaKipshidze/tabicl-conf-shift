@@ -37,6 +37,7 @@ from torch.nested import nested_tensor
 from torch.utils.data import IterableDataset
 
 from .graph_lib._config import PriorConfig
+from .graph_lib._pool import NonFiniteGraphUPoolError
 from ._mlp_scm import MLPSCM
 from ._tree_scm import TreeSCM
 from ._graph_scm import GraphSCM
@@ -1026,7 +1027,11 @@ class GraphPrior(Prior):
                 )
             attempt += 1
             scm = GraphSCM(**params)
-            X, y = scm()
+            try:
+                X, y = scm()
+            except NonFiniteGraphUPoolError:
+                rejection_counts["non_finite_values"] += 1
+                continue
             if getattr(scm, "invalid_generation_", False):
                 rejection_counts["non_finite_values"] += 1
                 continue
